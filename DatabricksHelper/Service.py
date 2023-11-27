@@ -44,7 +44,11 @@ class PipelineService:
         result[key] = element
     return result
 
-  def init_dbutils(self):
+  def init_databricks(self):
+    if self.spark_session is None:
+      import IPython
+      self.spark_session = IPython.get_ipython().user_ns["spark"]
+
     self.databricks_dbutils = None
     if self.spark_session.conf.get("spark.databricks.service.client.enabled") == "true":
       from pyspark.dbutils import DBUtils
@@ -53,14 +57,14 @@ class PipelineService:
       import IPython
       self.databricks_dbutils = IPython.get_ipython().user_ns["dbutils"]
 
-  def __init__(self, spark):
+  def __init__(self, spark = None):
     self.session_id = str(uuid.uuid4())
     self.spark_session = spark
     #self.databricks_dbutils = dbutils
-    self.init_dbutils()
+    self.init_databricks()
     with open(os.environ.get("DATABRICKS_CONFIG"), 'r') as file:
         self.config = json.load(file)
-    self.host = spark.conf.get("spark.databricks.workspaceUrl")
+    self.host = self.spark_session.conf.get("spark.databricks.workspaceUrl")
     self.workspace_id = self.host.split('.', 1)[0]
     self.workspace = WorkspaceClient(host=self.host, token=self.databricks_dbutils.secrets.get(scope=self.config["Workspace"]["Token"]["Scope"], key=self.config["Workspace"]["Token"]["Secret"]))
 
@@ -115,7 +119,7 @@ class StreamingListener(StreamingQueryListener, LogService):
   def onQueryProgress(self, event):
     print(event.progress.json)
     self.log('StreamingProgress', event.progress.json, True)
-    print(self.log)
+    #print(self.log)
     row = event.progress.observedMetrics.get("metrics")
     if row is not None:
       print(f"{row.load_id}-{row.cnt} rows processed!")
@@ -123,22 +127,6 @@ class StreamingListener(StreamingQueryListener, LogService):
   def onQueryTerminated(self, event):
     print(f"stream got terminated!")
 
-  def deep_dict(self, obj):
-    if not hasattr(obj, '__dict__'):
-        return obj
-    result = {}
-    for key, val in obj.__dict__.items():
-        if key.startswith('_'):
-            continue
-        element = []
-        if isinstance(val, list):
-            for item in val:
-                element.append(self.deep_dict(item))
-        else:
-            element = self.deep_dict(val)
-        result[key] = element
-    return result
-  
   def __init__(self, spark):
     LogService.__init__(self, spark)
 
