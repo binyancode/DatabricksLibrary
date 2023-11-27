@@ -1,0 +1,7 @@
+https://adb-2699253092421416.16.azuredatabricks.net/#secrets/createScope
+databricks configure
+dbutils.library.restartPython()
+Add AzureDatabricks to [Key Vault Reader]
+databricks secrets list-scopes
+databricks secrets  list-secrets databricks-token
+DATABRICKS_CONFIG=/Volumes/myfirstcatalog/mytestdb/configs/config.json
