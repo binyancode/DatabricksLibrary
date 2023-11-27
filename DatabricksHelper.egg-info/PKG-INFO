@@ -1,0 +1,15 @@
+Metadata-Version: 2.1
+Name: DatabricksHelper
+Version: 0.0.5
+Summary: Databricks Helper
+Home-page: https://github.com/binyan/PysparkPipelineProcess
+Author: binyan
+Author-email: binyan@microsoft.com
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+
+Databricks Helper
