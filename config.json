@@ -1,0 +1,16 @@
+{
+    "Workspace": {
+        "Token": {
+            "Scope": "databricks-token",
+            "Secret": "adb-1460040170249722-token"
+        }
+    },
+    "Data": {
+        "Checkpoint": {
+            "Path": "/Volumes/myfirstcatalog/mytestdb/checkpoints/"
+        }
+    },
+    "Log": {
+        "Path": "/Volumes/myfirstcatalog/mytestdb/logs/"
+    }
+}
