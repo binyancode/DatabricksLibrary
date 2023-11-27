@@ -5,3 +5,11 @@ Add AzureDatabricks to [Key Vault Reader]
 databricks secrets list-scopes
 databricks secrets  list-secrets databricks-token
 DATABRICKS_CONFIG=/Volumes/myfirstcatalog/mytestdb/configs/config.json
+
+git config --global user.email "bin.y@live.com"
+git init
+git add .
+git commit -m "Initial commit"
+git branch -M main
+git remote add origin https://github.com/binyancode/DatabricksCode.git
+git push -u origin main

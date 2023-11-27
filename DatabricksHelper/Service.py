@@ -57,7 +57,7 @@ class PipelineService:
       import IPython
       self.databricks_dbutils = IPython.get_ipython().user_ns["dbutils"]
 
-  def __init__(self, spark = None):
+  def __init__(self, spark):
     self.session_id = str(uuid.uuid4())
     self.spark_session = spark
     #self.databricks_dbutils = dbutils
@@ -232,12 +232,12 @@ class Pipeline(LogService):
     checkpoint_dir = os.path.join(self.config["Data"]["Checkpoint"]["Path"], table)
     self.delete_all_files_and_folders(checkpoint_dir)
 
-  def __init__(self, spark):
+  def __init__(self, spark = None):
     super().__init__(spark)
     if Pipeline.streaming_listener is None:
       Pipeline.streaming_listener = StreamingListener(spark)
-      spark.streams.addListener(Pipeline.streaming_listener)
-      print(f"add {Pipeline.streaming_listener} {spark.sparkContext.appName}")
+      self.spark_session.streams.addListener(Pipeline.streaming_listener)
+      print(f"add {Pipeline.streaming_listener} {self.spark_session.sparkContext.appName}")
 
 
 
