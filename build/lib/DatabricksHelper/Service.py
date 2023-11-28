@@ -154,8 +154,8 @@ class Pipeline(LogService):
         return job.job_id
     return -1
 
-  def read_data(self, target_table, source_file, file_format):
-    checkpoint_dir = os.path.join(self.config["Data"]["Checkpoint"]["Path"], target_table)
+  def read_data(self, checkpoint_name, source_file, file_format):
+    checkpoint_dir = os.path.join(self.config["Data"]["Checkpoint"]["Path"], checkpoint_name)
     load_id = str(uuid.uuid4())
     df = self.spark_session.readStream \
       .format("cloudFiles") \
@@ -168,7 +168,7 @@ class Pipeline(LogService):
     reader = DataReader(df, load_id)
     return reader
 
-  def load_data(self, target_table, source_file, file_format, transform = None, reload_table = 0):
+  def load_table(self, target_table, source_file, file_format, transform = None, reload_table = 0):
     checkpoint_dir = os.path.join(self.config["Data"]["Checkpoint"]["Path"], target_table)
     if reload_table > 0:
       self.clear_checkpoint(target_table)
@@ -205,10 +205,55 @@ class Pipeline(LogService):
     .trigger(availableNow=True)\
     .toTable(target_table)
 
-    self.spark_session.conf.set("pileine.load_id", load_id)
+    self.spark_session.conf.set(f"pileine.{target_table.replace(' ', '_')}.load_id", load_id)
     self.log('Operations', { "Content": f'load table:{target_table}' })
     self.flush_log()
     self.wait_loading_data()
+    return load_id
+
+  def load_path(self, target_view, target_path, source_file, file_format, transform = None, reload_path = 0):
+    checkpoint_name = target_path.replace('/', '_')
+    checkpoint_dir = os.path.join(self.config["Data"]["Checkpoint"]["Path"], checkpoint_name)
+    if reload_path > 0:
+      self.clear_checkpoint(checkpoint_name)
+      self.log('Operations', { "Content": f'clear checkpoint:{checkpoint_dir}' })
+      self.delete_all_files_and_folders(target_path)
+      self.log('Operations', { "Content": f'clear path:{target_path}' })
+    #spark.streams.addListener(Listener())
+
+    reader = self.read_data(checkpoint_name, source_file, file_format)
+    df = reader.data
+    load_id = reader.load_id
+      #.selectExpr("*", "_metadata as source_metadata")
+    #:Callable[[DataFrame], DataFrame]
+    read_transform = None
+    write_transform = None
+    if isinstance(transform, list):
+      if len(transform) > 0:
+        read_transform = transform[0]
+      if len(transform) > 1:
+        write_transform = transform[1]
+    else:
+      read_transform = transform
+  
+    if read_transform is not None and callable(read_transform) and len(inspect.signature(read_transform).parameters) == 1:
+      df = read_transform(df)
+    df = df.observe("metrics", count(lit(1)).alias("cnt"), max(lit(load_id)).alias("load_id"))
+    df = df.writeStream.format("parquet")
+    if write_transform is not None and callable(write_transform) and len(inspect.signature(write_transform).parameters) == 1:
+      df = write_transform(df)
+    df = df.partitionBy("load_id")
+    df.option("checkpointLocation", checkpoint_dir)\
+    .trigger(availableNow=True)\
+    .outputMode("append") \
+    .option("path", target_path) \
+    .start()
+
+    self.spark_session.conf.set(f"pileine.{checkpoint_name.replace(' ', '_')}.load_id", load_id)
+    self.log('Operations', { "Content": f'load path:{target_path}' })
+    self.flush_log()
+    self.wait_loading_data()
+    self.spark_session.sql(f"CREATE OR REPLACE TEMPORARY VIEW `{target_view}` USING parquet OPTIONS (path '{target_path}')")
     return load_id
 
   def wait_loading_data(self):
