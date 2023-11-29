@@ -215,7 +215,7 @@ class Pipeline(LogService):
     .trigger(availableNow=True)\
     .toTable(target_table)
 
-    self.spark_session.conf.set(f"pileine.{target_table.replace(' ', '_')}.load_id", load_id)
+    self.save_load_id(target_table, load_id)
     self.log('Operations', { "Content": f'load table:{target_table}' })
     self.flush_log()
     self.wait_loading_data()
@@ -259,7 +259,8 @@ class Pipeline(LogService):
     .option("path", target_path) \
     .start()
 
-    self.spark_session.conf.set(f"pileine.{target_view.replace(' ', '_')}.load_id", load_id)
+    #self.spark_session.conf.set(f"pileine.{target_view.replace(' ', '_')}.load_id", load_id)
+    self.save_load_id(target_view, load_id)
     self.log('Operations', { "Content": f'load path:{target_path}' })
     self.flush_log()
     self.wait_loading_data()
@@ -292,6 +293,17 @@ class Pipeline(LogService):
   def clear_checkpoint(self, table):
     checkpoint_dir = os.path.join(self.config["Data"]["Checkpoint"]["Path"], table)
     self.delete_all_files_and_folders(checkpoint_dir)
+
+  def save_load_id(self, table, value):
+    key = f"pileine.{table.replace(' ', '_')}.load_id"
+    self.spark_session.conf.set(key, value)
+    self.databricks_dbutils.jobs.taskValues.set(key = key, value = value)
+
+  def get_load_id(self, task, table):
+    key = f"pileine.{table.replace(' ', '_')}.load_id"
+    load_id = self.databricks_dbutils.jobs.taskValues.get(taskKey = task, key = key)
+    self.spark_session.conf.set(key, load_id)
+    return load_id
 
   def __init__(self, spark = None):
     super().__init__(spark)
