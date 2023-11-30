@@ -172,8 +172,9 @@ class Pipeline(LogService):
         df = df.option(key, value)
 
     df = df.load(source_file) \
-      .withColumn("source_metadata",col("_metadata")) \
-      .withColumn("load_id",lit(load_id))
+      .withColumn("_source_metadata",col("_metadata")) \
+      .withColumn("_load_id",lit(load_id)) \
+      .withColumn("_load_time",lit(datetime.now())) 
     reader = DataReader(df, load_id)
     return reader
 
@@ -301,7 +302,7 @@ class Pipeline(LogService):
 
   def get_load_id(self, task, table):
     key = f"pileine.{table.replace(' ', '_')}.load_id"
-    load_id = self.databricks_dbutils.jobs.taskValues.get(taskKey = task, key = key)
+    load_id = self.databricks_dbutils.jobs.taskValues.get(taskKey = task, key = key, debugValue = "")
     self.spark_session.conf.set(key, load_id)
     return load_id
 
