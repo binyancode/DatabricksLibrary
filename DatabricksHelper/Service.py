@@ -6,12 +6,15 @@ from pyspark.sql import DataFrame, Observation
 from typing import Callable
 from pyspark.sql.streaming import StreamingQueryListener, StreamingQuery
 from datetime import datetime
+from urllib.parse import unquote
 import uuid
 import json
 import os
 import time
 import shutil
 import inspect
+import re
+
 
 class DataReader:
     def __init__(self, data, load_id):
@@ -82,7 +85,11 @@ class LogService(PipelineService):
       for key, value in self.logs.items():
         log_dir = os.path.join(self.config["Log"]["Path"], key, f"{datetime.now().strftime('%Y%m')}")
         if not os.path.exists(log_dir):
-          os.makedirs(log_dir)
+          try:
+            os.makedirs(log_dir)
+          except OSError as e:
+            print(e)
+            pass
         log_file = os.path.join(log_dir, f"{f'{time.time():0<{18}}'.replace('.', '')}-{self.session_id.replace('-', '')}-{str(uuid.uuid4()).replace('-', '')}.json")
         with open(log_file, 'a') as file:
             file.write(json.dumps(value))
@@ -146,7 +153,7 @@ class Pipeline(LogService):
     self.log("Operations", { "Content": f'run job:{job_name}({job_id})' })
     self.flush_log()
     print(f"{json.dumps(result_dict)}\n")
-    return run
+    return result_dict
   
   def get_job_id(self, job_name:str) -> int:
     for job in self.workspace.jobs.list():
@@ -154,14 +161,18 @@ class Pipeline(LogService):
         return job.job_id
     return -1
 
-  def read_data(self, checkpoint_name, source_file, file_format, reader_options = None):
-    checkpoint_dir = os.path.join(self.config["Data"]["Checkpoint"]["Path"], checkpoint_name)
+  def read_data(self, target_table, source_file, file_format, reader_options = None):
+    checkpoint_dir = os.path.join(self.config["Data"]["Checkpoint"]["Path"], target_table)
+    if 'Schema' in self.config["Data"]:
+      schema_dir = os.path.join(self.config["Data"]["Schema"]["Path"], target_table)
+    else:
+      schema_dir = checkpoint_dir
     load_id = str(uuid.uuid4())
     df = self.spark_session.readStream \
       .format("cloudFiles") \
       .option("cloudFiles.format", file_format)\
       .option("cloudFiles.inferColumnTypes", "true")\
-      .option("cloudFiles.schemaLocation", checkpoint_dir)
+      .option("cloudFiles.schemaLocation", schema_dir)
 
     if 'ReaderOptions' in self.config["Data"]:
       for key, value in self.config["Data"]["ReaderOptions"].items():
@@ -180,13 +191,23 @@ class Pipeline(LogService):
 
   def load_table(self, target_table, source_file, file_format, reader_options = None, transform = None, reload_table = 0):
     checkpoint_dir = os.path.join(self.config["Data"]["Checkpoint"]["Path"], target_table)
-    if reload_table > 0:
+    schema_dir = os.path.join(self.config["Data"]["Schema"]["Path"], target_table)
+    if reload_table & 1:
+      self.clear_schema(target_table)
+      self.log('Operations', { "Content": f'clear schema:{schema_dir}' })
+      print(f'clear schema:{schema_dir}')
+    if reload_table & 2:
       self.clear_checkpoint(target_table)
       self.log('Operations', { "Content": f'clear checkpoint:{checkpoint_dir}' })
-      if not self.truncate_table(target_table, reload_table):
+      print(f'clear checkpoint:{checkpoint_dir}')
+    if reload_table & 4:
+      print(f'clear table:{target_table}')
+      if not self.truncate_table(target_table, not reload_table & 8):
         self.log('Operations', { "Content": f'clear table:{target_table} not exists' })
+        print(f'clear table:{target_table} not exists')
       else:
         self.log('Operations', { "Content": f'clear table:{target_table}' })
+        print(f'clear table:{target_table}')
     #spark.streams.addListener(Listener())
 
     reader = self.read_data(target_table, source_file, file_format, reader_options)
@@ -211,7 +232,7 @@ class Pipeline(LogService):
     df = df.writeStream
     if write_transform is not None and callable(write_transform) and len(inspect.signature(write_transform).parameters) == 1:
       df = write_transform(df)
-    df = df.partitionBy("load_id")
+    df = df.partitionBy("_load_id", "_load_time")
     df.option("checkpointLocation", checkpoint_dir)\
     .trigger(availableNow=True)\
     .toTable(target_table)
@@ -225,7 +246,10 @@ class Pipeline(LogService):
   def load_view(self, target_view, target_path, source_file, file_format, reader_options = None, transform = None, reload_view = 0):
     checkpoint_name = target_path.replace('/', '_')
     checkpoint_dir = os.path.join(self.config["Data"]["Checkpoint"]["Path"], checkpoint_name)
+    schema_dir = os.path.join(self.config["Data"]["Schema"]["Path"], checkpoint_name)
     if reload_view > 0:
+      self.clear_schema(checkpoint_name)
+      self.log('Operations', { "Content": f'clear checkpoint:{schema_dir}' })
       self.clear_checkpoint(checkpoint_name)
       self.log('Operations', { "Content": f'clear checkpoint:{checkpoint_dir}' })
       self.delete_all_files_and_folders(target_path)
@@ -253,19 +277,20 @@ class Pipeline(LogService):
     df = df.writeStream.format("parquet")
     if write_transform is not None and callable(write_transform) and len(inspect.signature(write_transform).parameters) == 1:
       df = write_transform(df)
-    df = df.partitionBy("load_id")
+    df = df.partitionBy("_load_id", "_load_time")
     df.option("checkpointLocation", checkpoint_dir)\
     .trigger(availableNow=True)\
+    .format("delta") \
     .outputMode("append") \
     .option("path", target_path) \
     .start()
 
-    #self.spark_session.conf.set(f"pileine.{target_view.replace(' ', '_')}.load_id", load_id)
+    #self.spark_session.conf.set(f"pipeline.{target_view.replace(' ', '_')}.load_id", load_id)
     self.save_load_id(target_view, load_id)
     self.log('Operations', { "Content": f'load path:{target_path}' })
     self.flush_log()
     self.wait_loading_data()
-    self.view(target_view, target_path)
+    self.view(target_view, target_path, 'delta')
     #self.spark_session.sql(f"CREATE OR REPLACE TEMPORARY VIEW `{target_view}` USING parquet OPTIONS (path '{target_path}')")
     return load_id
 
@@ -283,10 +308,12 @@ class Pipeline(LogService):
   def truncate_table(self, table, clear_type):
     try:
         self.spark_session.sql(f"SELECT 1 FROM {table} LIMIT 1")
-        if clear_type == 1:
+        if clear_type:
           self.spark_session.sql(f'truncate table {table}')
-        elif clear_type == 2:
+          print(f'truncate table {table}')
+        else:
           self.spark_session.sql(f'drop table {table}')
+          print(f'drop table {table}')
         return True
     except:
         return False
@@ -295,16 +322,48 @@ class Pipeline(LogService):
     checkpoint_dir = os.path.join(self.config["Data"]["Checkpoint"]["Path"], table)
     self.delete_all_files_and_folders(checkpoint_dir)
 
+  def clear_schema(self, table):
+    if 'Schema' in self.config["Data"]:
+      schema_dir = os.path.join(self.config["Data"]["Schema"]["Path"], table)
+      self.delete_all_files_and_folders(schema_dir)
+
   def save_load_id(self, table, value):
-    key = f"pileine.{table.replace(' ', '_')}.load_id"
+    key = f"task.{table.replace(' ', '_')}.load_id"
     self.spark_session.conf.set(key, value)
     self.databricks_dbutils.jobs.taskValues.set(key = key, value = value)
 
   def get_load_id(self, task, table):
-    key = f"pileine.{table.replace(' ', '_')}.load_id"
+    key = f"task.{table.replace(' ', '_')}.load_id"
     load_id = self.databricks_dbutils.jobs.taskValues.get(taskKey = task, key = key, debugValue = "")
     self.spark_session.conf.set(key, load_id)
     return load_id
+
+  def clear_table(self, table_names, earlist_time):
+    self.log('Operations', { "Content": f'clear table:{table_names} older than {earlist_time}' })
+    for table_name in table_names:
+      df = self.spark_session.sql(f"SHOW PARTITIONS {table_name}")
+      df.createOrReplaceTempView("partitions")
+      self.spark_session.sql(f"delete from {table_name} where _load_id in (select _load_id from partitions where _load_time < '{earlist_time}')").collect()
+
+  def clear_view(self, view_names, earlist_time):
+    table_names = []
+    for view_name in view_names:
+      df = self.spark_session.sql(f"SHOW CREATE TABLE {view_name}").collect()
+      df[0].createtab_stmt
+      match = re.search('delta.`(.*)`', df[0].createtab_stmt)
+      if match:
+          result = match.group(1)
+          table_names.append(f"delta.`{result}`")
+      else:
+          print(f"error:invalid view:{view_name}")  # 输出: target
+    self.clear_table(table_names, earlist_time)
+    # for dirpath, dirnames, filenames in os.walk(view_path):
+    #   dirname = os.path.basename(dirpath)
+    #   parent_dirname = os.path.basename(os.path.dirname(dirpath))
+    #   if dirname.startswith("_load_time"):
+    #       if datetime.strptime(unquote(dirname)[11:30], "%Y-%m-%d %H:%M:%S") < datetime.strptime(earlist_time, "%Y-%m-%d"):
+    #           print(f"Directory: {unquote(dirname)[11:30]}, Parent directory: {unquote(parent_dirname)}")
+    #           self.delete_all_files_and_folders(parent_dirname)
 
   def __init__(self, spark = None):
     super().__init__(spark)

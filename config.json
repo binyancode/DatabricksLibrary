@@ -9,6 +9,9 @@
         "Checkpoint": {
             "Path": "/Volumes/myfirstcatalog/mytestdb/checkpoints/"
         },
+        "Schema": {
+            "Path": "/Volumes/myfirstcatalog/mytestdb/schemas/"
+        },
         "ReaderOptions":{
             "cloudFiles.resourceTag.NSB": "EDP"
         }
