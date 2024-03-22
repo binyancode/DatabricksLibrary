@@ -202,7 +202,7 @@ class Pipeline(LogService):
       print(f'clear checkpoint:{checkpoint_dir}')
     if reload_table & 4:
       print(f'clear table:{target_table}')
-      if not self.truncate_table(target_table, not reload_table & 8):
+      if not self.truncate_table(target_table, reload_table & 8):
         self.log('Operations', { "Content": f'clear table:{target_table} not exists' })
         print(f'clear table:{target_table} not exists')
       else:
