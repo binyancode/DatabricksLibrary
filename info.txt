@@ -6,6 +6,13 @@ databricks secrets list-scopes
 databricks secrets  list-secrets databricks-token
 DATABRICKS_CONFIG=/Volumes/myfirstcatalog/mytestdb/configs/config.json
 
+pip3 install databricks-sdk
+pip install pyspark
+pip install ipython
+pip install DBUtils
+
+dbutils.library.restartPython()
+
 git config --global user.email "bin.y@live.com"
 git init
 git add .

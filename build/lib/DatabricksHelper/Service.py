@@ -339,6 +339,10 @@ class Pipeline(LogService):
     self.spark_session.conf.set(key, load_id)
     return load_id
 
+  def save_load_info(self, table, load_id):
+    load_info = {"table":table, "load_id":load_id}
+    self.databricks_dbutils.jobs.taskValues.set(key = "task_load_info", value = json.dumps(load_info))
+
   def get_load_info(self):
     #context = self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext()
     jobGroupId = self.databricks_dbutils.notebook.entry_point.getJobGroupId()
@@ -364,7 +368,7 @@ class Pipeline(LogService):
         for task_key in depend_on_task_keys:
             tasks = [task for task in job.settings.tasks if task.task_key == task_key]
             for task in tasks:
-                load_info_value = self.databricks_dbutils.jobs.taskValues.get(taskKey = task.task_key, key = "load_info", default = "")
+                load_info_value = self.databricks_dbutils.jobs.taskValues.get(taskKey = task.task_key, key = "task_load_info", default = "")
                 print(load_info_value)
                 if load_info_value:
                     load_info = json.loads(load_info_value)
@@ -378,7 +382,7 @@ class Pipeline(LogService):
                     
         print(all_load_info)
     else:
-        print('task_run_id No match found')
+        print('No task_run_id found')
     return all_load_info
 
   def clear_table(self, table_names, earlist_time):
