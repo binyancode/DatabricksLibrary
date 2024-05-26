@@ -9,7 +9,7 @@ DATABRICKS_CONFIG=/Volumes/myfirstcatalog/mytestdb/configs/config.json
 git config --global user.email "bin.y@live.com"
 git init
 git add .
-git commit -m "Initial commit"
+git commit -m "Initial commit" 
 git branch -M main
 git remote add origin https://github.com/binyancode/DatabricksLibrary.git
 git push -u origin main
