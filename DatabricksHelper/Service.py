@@ -348,8 +348,6 @@ class Pipeline(LogService):
     match = re.search('run-(.*?)-action', jobGroupId)
     if match:
         task_run_id = match.group(1)
-        # DATABRICKS_HOST = "adb-1460040170249722.2.azuredatabricks.net"
-        # TOKEN = "dapib90cb88303e19781ee15451b4c68930e"
 
         run = self.workspace.jobs.get_run(task_run_id)
         job = self.workspace.jobs.get(run.job_id)
