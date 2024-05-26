@@ -16,6 +16,7 @@ import inspect
 import re
 
 
+
 class DataReader:
     def __init__(self, data, load_id):
         self.data = data
@@ -337,6 +338,50 @@ class Pipeline(LogService):
     load_id = self.databricks_dbutils.jobs.taskValues.get(taskKey = task, key = key, debugValue = "")
     self.spark_session.conf.set(key, load_id)
     return load_id
+
+  def get_load_info(self):
+    #context = self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+    jobGroupId = self.databricks_dbutils.notebook.entry_point.getJobGroupId()
+    print(jobGroupId)
+
+    all_load_info = {}
+    match = re.search('run-(.*?)-action', jobGroupId)
+    if match:
+        task_run_id = match.group(1)
+        # DATABRICKS_HOST = "adb-1460040170249722.2.azuredatabricks.net"
+        # TOKEN = "dapib90cb88303e19781ee15451b4c68930e"
+
+        run = self.workspace.jobs.get_run(task_run_id)
+        job = self.workspace.jobs.get(run.job_id)
+        tasks = [task for task in job.settings.tasks if task.task_key == run.run_name]
+        depend_on_task_keys = [dep.task_key for task in tasks for dep in task.depends_on]
+
+        schema = StructType([
+            StructField("table", StringType(), True),
+            StructField("load_id", StringType(), True)
+        ])
+        df = self.spark_session.createDataFrame([], schema)
+        df.createOrReplaceTempView('load_info')
+
+        for task_key in depend_on_task_keys:
+            tasks = [task for task in job.settings.tasks if task.task_key == task_key]
+            for task in tasks:
+                load_info_value = self.databricks_dbutils.jobs.taskValues.get(taskKey = task.task_key, key = "load_info", default = "")
+                print(load_info_value)
+                if load_info_value:
+                    load_info = json.loads(load_info_value)
+                    all_load_info[load_info["table"]] = load_info
+                    df = df.union(self.spark_session.createDataFrame([(load_info["table"], load_info["load_id"])], schema))
+                    df.createOrReplaceTempView('load_info')
+                    #exec(f'{load_info["table"]}_load_id = "{load_info["load_id"]}"')
+                    #spark.createDataFrame([(load_info["table"], load_info["load_id"])], ("table", "load_id")).createOrReplaceTempView('load_info')
+                    print(f'{load_info["table"]}_load_id')
+                    print(f'{task.task_key}, {load_info["table"]}, {load_info["load_id"]}')
+                    
+        print(all_load_info)
+    else:
+        print('No match found')
+    return all_load_info
 
   def clear_table(self, table_names, earlist_time):
     self.log('Operations', { "Content": f'clear table:{table_names} older than {earlist_time}' })
