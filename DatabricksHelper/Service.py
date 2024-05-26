@@ -358,8 +358,8 @@ class Pipeline(LogService):
             StructField("table", StringType(), True),
             StructField("load_id", StringType(), True)
         ])
-        df = self.spark_session.createDataFrame([], schema)
-        df.createOrReplaceTempView('load_info')
+        df_load_info = self.spark_session.createDataFrame([], schema)
+        df_load_info.createOrReplaceTempView('load_info')
 
         for task_key in depend_on_task_keys:
             tasks = [task for task in job.settings.tasks if task.task_key == task_key]
@@ -369,8 +369,8 @@ class Pipeline(LogService):
                 if load_info_value:
                     load_info = json.loads(load_info_value)
                     all_load_info[load_info["table"]] = load_info
-                    df = df.union(self.spark_session.createDataFrame([(load_info["table"], load_info["load_id"])], schema))
-                    df.createOrReplaceTempView('load_info')
+                    df_load_info = df_load_info.union(self.spark_session.createDataFrame([(load_info["table"], load_info["load_id"])], schema))
+                    df_load_info.createOrReplaceTempView('load_info')
                     #exec(f'{load_info["table"]}_load_id = "{load_info["load_id"]}"')
                     #spark.createDataFrame([(load_info["table"], load_info["load_id"])], ("table", "load_id")).createOrReplaceTempView('load_info')
                     print(f'{load_info["table"]}_load_id')
@@ -378,7 +378,7 @@ class Pipeline(LogService):
                     
         print(all_load_info)
     else:
-        print('No match found')
+        print('No task_run_id found')
     return all_load_info
 
   def clear_table(self, table_names, earlist_time):

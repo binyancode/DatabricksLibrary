@@ -5,13 +5,13 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="DatabricksHelper", # Replace with your own username
-    version="0.0.5",
+    version="0.1.0",
     author="binyan",
-    author_email="binyan@microsoft.com",
+    author_email="bin.y@live.com",
     description="Databricks Helper",
     long_description="Databricks Helper",
     long_description_content_type="text/markdown",
-    url="https://github.com/binyan/PysparkPipelineProcess",
+    url="https://github.com/binyancode/DatabricksLibrary.git",
     packages=['DatabricksHelper'],
     classifiers=[
         "Programming Language :: Python :: 3",
