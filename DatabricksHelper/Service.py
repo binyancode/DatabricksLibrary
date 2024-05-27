@@ -71,6 +71,22 @@ class PipelineService:
         self.host = self.spark_session.conf.get("spark.databricks.workspaceUrl")
         self.workspace_id = self.host.split('.', 1)[0]
         self.workspace = WorkspaceClient(host=self.host, token=self.databricks_dbutils.secrets.get(scope=self.config["Workspace"]["Token"]["Scope"], key=self.config["Workspace"]["Token"]["Secret"]))
+        jobGroupId = self.databricks_dbutils.notebook.entry_point.getJobGroupId()
+        print(jobGroupId)
+        match = re.search('run-(.*?)-action', jobGroupId)
+        if match:
+            task_run_id = match.group(1)
+            run = self.workspace.jobs.get_run(task_run_id)
+            self.job = self.workspace.jobs.get(run.job_id)
+            tasks = [task for task in self.job.settings.tasks if task.task_key == run.run_name]
+            if len(tasks) > 0:
+                self.task = tasks[0]
+            else:
+                self.task = None
+        else:
+             self.job = None
+             
+
 
 class LogService(PipelineService):
     def log(self, category, content, flush = False):
@@ -332,6 +348,7 @@ class Pipeline(LogService):
         key = f"task.{table.replace(' ', '_')}.load_id"
         self.spark_session.conf.set(key, value)
         self.databricks_dbutils.jobs.taskValues.set(key = key, value = value)
+        self.save_load_info(table, value)
 
     def get_load_id(self, task, table):
         key = f"task.{table.replace(' ', '_')}.load_id"
@@ -345,18 +362,10 @@ class Pipeline(LogService):
 
     def get_load_info(self):
         #context = self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext()
-        jobGroupId = self.databricks_dbutils.notebook.entry_point.getJobGroupId()
-        print(jobGroupId)
 
         all_load_info = {}
-        match = re.search('run-(.*?)-action', jobGroupId)
-        if match:
-            task_run_id = match.group(1)
-
-            run = self.workspace.jobs.get_run(task_run_id)
-            job = self.workspace.jobs.get(run.job_id)
-            tasks = [task for task in job.settings.tasks if task.task_key == run.run_name]
-            depend_on_task_keys = [dep.task_key for task in tasks for dep in task.depends_on]
+        if self.job is not None and self.task is not None:
+            depend_on_task_keys = [depend_on.task_key for depend_on in self.task.depends_on]
 
             schema = StructType([
                 StructField("table", StringType(), True),
@@ -366,7 +375,7 @@ class Pipeline(LogService):
             df_load_info.createOrReplaceTempView('load_info')
 
             for task_key in depend_on_task_keys:
-                tasks = [task for task in job.settings.tasks if task.task_key == task_key]
+                tasks = [task for task in self.job.settings.tasks if task.task_key == task_key]
                 for task in tasks:
                     load_info_value = self.databricks_dbutils.jobs.taskValues.get(taskKey = task.task_key, key = "task_load_info", default = "")
                     print(load_info_value)
