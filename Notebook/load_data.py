@@ -2,12 +2,14 @@
 dbutils.widgets.text("table", "myfirstcatalog.mytestdb.testschema")
 dbutils.widgets.text("source", "/Volumes/myfirstcatalog/mytestdb/external-volume/data/testdata/")
 dbutils.widgets.text("source_format", "csv")
+dbutils.widgets.text("table_alias", "testschema")
 dbutils.widgets.text("reader_options", "{\"cloudFiles.schemaHints\":\"date DATE\"}")
 dbutils.widgets.text("reload_table", "0")
 
 table = dbutils.widgets.get("table")
 source = dbutils.widgets.get("source")
 source_format = dbutils.widgets.get("source_format")
+table_alias = dbutils.widgets.get("table_alias")
 reader_options = dbutils.widgets.get("reader_options")
 reload_table = int(dbutils.widgets.get("reload_table"))
 print(reader_options)
@@ -51,7 +53,7 @@ def sch_remove_whitespace(df):
       print(c)
   return df
 
-load_id = p.load_table(table, source, source_format, reader_options= options, transform= [sch_remove_whitespace, lambda df:df.option("mergeSchema", "true")], reload_table=reload_table)
+load_id = p.load_table(table, source, source_format, table_alias=table_alias, reader_options= options, transform= [sch_remove_whitespace, lambda df:df.option("mergeSchema", "true")], reload_table=reload_table)
 
 # COMMAND ----------
 
