@@ -1,6 +1,6 @@
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.jobs import JobTaskSettings, NotebookTask,NotebookTaskSource
-from pyspark.sql.functions import explode, col, lit, count, max
+from pyspark.sql.functions import explode, col, lit, count, max, from_json
 from pyspark.sql.types import StructType, StructField, StringType,IntegerType
 from pyspark.sql import DataFrame, Observation
 from typing import Callable
@@ -85,11 +85,16 @@ class PipelineService:
         if match:
             task_run_id = match.group(1)
             run = self.workspace.jobs.get_run(task_run_id)
-            self.job = self.workspace.jobs.get(run.job_id)
-            tasks = [task for task in self.job.settings.tasks if task.task_key == run.run_name]
-            if len(tasks) > 0:
-                self.task = tasks[0]
-            else:
+            try:
+                self.job = self.workspace.jobs.get(run.job_id)
+                tasks = [task for task in self.job.settings.tasks if task.task_key == run.run_name]
+                if len(tasks) > 0:
+                    self.task = tasks[0]
+                else:
+                    self.task = None
+            except Exception as ex:
+                print(f"Cannot found job: {ex}")
+                self.job = None
                 self.task = None
         else:
              self.job = None
@@ -168,7 +173,10 @@ class Pipeline(LogService):
     def run(self, run_id:str, job_name:str, params = None):
         if params is not None and isinstance(params, str):
             params = json.loads(params)
-        
+        if self.default_catalog:
+            if params is None:
+                params = {}
+            params["default_catalog"] = self.default_catalog
         job_id = self.get_job_id(job_name)
         run = self.workspace.jobs.run_now_and_wait(job_id, notebook_params=params)
         
@@ -369,7 +377,7 @@ class Pipeline(LogService):
         load_info = {"table":table, "view": view, "load_id":load_id}
         self.databricks_dbutils.jobs.taskValues.set(key = "task_load_info", value = json.dumps(load_info))
 
-    def get_load_info(self):
+    def get_load_info(self, schema = None, debug = None):
         #context = self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext()
 
         all_load_info = {}
@@ -417,6 +425,9 @@ class Pipeline(LogService):
                         #load_info["data"] = temp_df
                         all_load_info[f"{temp_view}_info"] = SimpleNamespace(**load_info)
                         all_load_info[temp_view] = temp_df 
+
+                        schema.get("xxxx")
+
                         #exec(f'{load_info["table"]}_load_id = "{load_info["load_id"]}"')
                         #spark.createDataFrame([(load_info["table"], load_info["load_id"])], ("table", "load_id")).createOrReplaceTempView('load_info')
                         print(f'{load_info["table"]}_load_id')
@@ -426,26 +437,37 @@ class Pipeline(LogService):
                 print(f"{table.name} {table.tableType}")
             self.spark_session.sql("select * from load_info").collect()            
             print(all_load_info)
-        else:
-            print('No task_run_id found')
+        elif debug is not None:
+            print('No task_run_id found, debug mode.')
+            for temp_view, temp_table in debug.items():
+                query = f"""
+                    SELECT t.* FROM {temp_table} t where _load_id = 
+                    (
+                        SELECT MAX(_load_id)
+                        FROM {temp_table}
+                        WHERE _load_time = (SELECT MAX(_load_time) FROM {temp_table})
+                    )
+                    """
+                temp_df = self.spark_session.sql(query)
+                temp_df.createOrReplaceTempView(temp_view)
+                all_load_info[temp_view] = temp_df
+        if schema is not None:
+            for temp_view, temp_df in all_load_info.items():
+                view_schema = schema.get(temp_view)
+                if view_schema:
+                    temp_df = all_load_info[temp_view]
+                    for col_name, col_schema in view_schema.items():
+                        temp_df = temp_df.withColumn(col_name, from_json(col(col_name), col_schema))
+                        print(f"view:{temp_view} apply schema:{col_name}")
+                    temp_df.createOrReplaceTempView(temp_view)
+                    all_load_info[temp_view] = temp_df
+
         load = SimpleNamespace(**all_load_info)
-        load.load = MethodType(lambda this,table:self.load_temp_table(table), load)
+        #load.load = MethodType(lambda this,table:self.load_temp_table(table), load)
         return load
 
-    def load_temp_table(self, table):
-        table_name = self.databricks_dbutils.widgets.get(table)
-        if self.job is None or self.task is None:
-            query = f"""
-                SELECT t.* FROM {table_name} t where _load_id = 
-                (
-                    SELECT MAX(_load_id)
-                    FROM {table_name}
-                    WHERE _load_time = (SELECT MAX(_load_time) FROM {table_name})
-                )
-                """
-            return self.spark_session.sql(query)
-        else:
-            return self.spark_session.sql(f"SELECT * FROM {table_name}")
+    def set_default_catalog(self, catalog):
+        self.spark_session.catalog.setCurrentCatalog(catalog)
 
     def clear_table(self, table_names, earlist_time):
         self.log('Operations', { "Content": f'clear table:{table_names} older than {earlist_time}' })
@@ -474,8 +496,12 @@ class Pipeline(LogService):
         #           print(f"Directory: {unquote(dirname)[11:30]}, Parent directory: {unquote(parent_dirname)}")
         #           self.delete_all_files_and_folders(parent_dirname)
 
-    def __init__(self, spark = None):
+    def __init__(self, default_catalog = None, spark = None):
         super().__init__(spark)
+        self.default_catalog = None
+        if default_catalog:
+            self.default_catalog = default_catalog
+            self.set_default_catalog(self.default_catalog)
         if Pipeline.streaming_listener is None:
             Pipeline.streaming_listener = StreamingListener(spark)
             self.spark_session.streams.addListener(Pipeline.streaming_listener)
