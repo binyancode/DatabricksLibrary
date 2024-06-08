@@ -1,0 +1,31 @@
+{
+    "job_clusters": {
+        "Job_cluster001": {
+            "job_cluster_key": "Job_cluster001",
+            "new_cluster": {
+                "cluster_name": "",
+                "spark_version": "14.3.x-scala2.12",
+                "azure_attributes": {
+                    "first_on_demand": 1,
+                    "availability": "ON_DEMAND_AZURE",
+                    "spot_bid_max_price": -1
+                },
+                "node_type_id": "Standard_D4ds_v5",
+                "spark_env_vars": {
+                    "DATABRICKS_CONFIG": "/Volumes/evacatalog/workflow/config/config.json"
+                },
+                "enable_elastic_disk": true,
+                "data_security_mode": "USER_ISOLATION",
+                "runtime_engine": "PHOTON",
+                "num_workers": 1
+            }
+        }
+    },
+    "task_job_cluster": {
+        "load_bp": "Job_cluster001",
+        "transform_bp": "Job_cluster001"
+    },
+    "task_cluster": {
+        
+    }
+}

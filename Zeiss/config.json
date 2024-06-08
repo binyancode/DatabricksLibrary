@@ -1,0 +1,27 @@
+{
+    "Workspace": {
+        "Token": {
+            "Scope": "databricks-token",
+            "Secret": "adb-732672050507723-token"
+        }
+    },
+    "Job":{
+        "Cluster": {
+            "Path": "/Volumes/evacatalog/workflow/config/cluster/",
+            "PipelineLibaray": "/Volumes/evacatalog/workflow/init-scripts/DatabricksHelper-0.1.0-py3-none-any.whl"
+        }
+    },
+    "Data": {
+        "Checkpoint": {
+            "Path": "/Volumes/evacatalog/workflow/checkpoints/"
+        },
+        "Schema": {
+            "Path": "/Volumes/evacatalog/workflow/schemas/"
+        },
+        "ReaderOptions":{
+        }
+    },
+    "Log": {
+        "Path": "/Volumes/evacatalog/workflow/logs/"
+    }
+}

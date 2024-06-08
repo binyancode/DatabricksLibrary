@@ -5,6 +5,11 @@
             "Secret": "adb-1460040170249722-token"
         }
     },
+    "Job":{
+        "JobCluster": {
+            "Path": "/Volumes/evacatalog/workflow/config/job-cluster/"
+        }
+    },
     "Data": {
         "Checkpoint": {
             "Path": "/Volumes/myfirstcatalog/mytestdb/checkpoints/"

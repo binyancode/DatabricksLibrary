@@ -1,5 +1,5 @@
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.jobs import JobTaskSettings, NotebookTask,NotebookTaskSource
+from databricks.sdk.service.jobs import Library, JobCluster, JobSettings, JobTaskSettings, NotebookTask,NotebookTaskSource
 from pyspark.sql.functions import explode, col, lit, count, max, from_json
 from pyspark.sql.types import StructType, StructField, StringType,IntegerType
 from pyspark.sql import DataFrame, Observation
@@ -55,7 +55,46 @@ class PipelineService:
                 element = self.deep_dict(val)
             result[key] = element
         return result
+    
+    def copy_object(self, obj, seen=None):
+        if seen is None:
+            seen = set()
 
+        if id(obj) in seen:
+            return
+
+        seen.add(id(obj))
+
+
+        result = {}
+        if isinstance(obj, dict):
+            return self.deep_dict(obj)
+        elif not hasattr(obj, '__dir__'):
+            return obj
+        
+        for key in dir(obj):
+            if key.startswith('_'):
+                continue
+            val = getattr(obj, key)
+            if 'method' in type(val).__name__:
+                continue
+            #print(type(val).__name__)
+            
+            if isinstance(val, (int, float, str, bool, type(None))):
+                #print("simple:", key, val)
+                result[key] = val
+            elif isinstance(val, list):
+                #print("list:", key)
+                element = []
+                for item in val:
+                    #print("item:", type(item), key, item)
+                    element.append(self.copy_object(item, seen))
+                result[key] = element
+            else:
+                #print("object:", key, val)
+                result[key] = self.copy_object(val, seen)
+        return result
+    
     def init_databricks(self):
         if self.spark_session is None:
             import IPython
@@ -178,6 +217,7 @@ class Pipeline(LogService):
                 params = {}
             params["default_catalog"] = self.default_catalog
         job_id = self.get_job_id(job_name)
+        self.init_job_cluster(job_name)
         run = self.workspace.jobs.run_now_and_wait(job_id, notebook_params=params)
         
         result_dict = self.deep_dict(run)
@@ -187,7 +227,61 @@ class Pipeline(LogService):
         self.flush_log()
         print(f"{json.dumps(result_dict)}\n")
         return result_dict
-  
+
+    def init_job_cluster(self, job_name):
+        job = None
+        for base_job in [base_job for base_job in self.workspace.jobs.list() if base_job.settings.name == job_name]:
+            job = self.workspace.jobs.get(base_job.job_id)
+        if not job:
+            return
+        
+        job_cluster_file = os.path.join(self.config["Job"]["Cluster"]["Path"], self.workspace_id, f"{job_name}.json")
+        if os.path.exists(job_cluster_file):
+            print(f"The job cluster file '{job_cluster_file}' exists.")
+            with open(job_cluster_file, 'r') as file:
+                job_cluster_json = json.load(file)
+
+                if "job_clusters" in job_cluster_json:
+                    for job_cluster_key, job_cluster_def in job_cluster_json["job_clusters"].items():
+                        if job.settings.job_clusters is not None:
+                            for cluster in [job_cluster for job_cluster in job.settings.job_clusters if job_cluster.job_cluster_key == job_cluster_key]:
+                                job.settings.job_clusters.remove(cluster)
+                        else:
+                            job.settings.job_clusters = []
+                        job.settings.job_clusters.append(JobCluster(job_cluster_key).from_dict(job_cluster_def))
+                        self.workspace.jobs.reset(job.job_id, job.settings)
+                        print(f"Apply job cluster {job_cluster_key} for job: {job_name}")
+
+                pipeline_library = self.config["Job"]["Cluster"]["PipelineLibaray"]
+                
+                for task in job.settings.tasks:
+                    if "task_job_cluster" in job_cluster_json:
+                        for task_key, job_cluster_key in job_cluster_json["task_job_cluster"].items():
+                            if task.task_key == task_key:
+                                task.job_cluster_key = job_cluster_key
+                                if task.libraries is None:
+                                    task.libraries = []
+                                for library in [library for library in task.libraries if "whl" in library and library["whl"] == pipeline_library]:
+                                    task.libraries.remove(library)
+                                task.libraries.append({"whl": pipeline_library})
+                                self.workspace.jobs.reset(job.job_id, job.settings)
+                                print(f"Apply job cluster {job_cluster_key} for task: {task.task_key}")
+
+                    if "task_cluster" in job_cluster_json:
+                        for task_key, existing_cluster_id in job_cluster_json["task_cluster"].items():
+                            if task.task_key == task_key:
+                                task.job_cluster_key = None
+                                if task.libraries is None:
+                                    task.libraries = []
+                                for library in [library for library in task.libraries if "whl" in library and library["whl"] == pipeline_library]:
+                                    task.libraries.remove(library)
+                                task.libraries.append({"whl":pipeline_library})
+                                task.existing_cluster_id = existing_cluster_id
+                                self.workspace.jobs.reset(job.job_id, job.settings)
+                                print(f"Apply existing cluster {existing_cluster_id} for task: {task.task_key}")
+        else:
+            print(f"The job cluster file '{job_cluster_file}' does not exist.")
+
     def get_job_id(self, job_name:str) -> int:
         for job in self.workspace.jobs.list():
             if job_name == job.settings.name:
@@ -270,7 +364,6 @@ class Pipeline(LogService):
         .trigger(availableNow=True)\
         .toTable(target_table)
 
-        self.save_load_id(target_table, load_id)
         self.save_load_info(target_table, table_alias, load_id)
         self.log('Operations', { "Content": f'load table:{target_table}' })
         self.flush_log()
@@ -320,7 +413,6 @@ class Pipeline(LogService):
         .start()
 
         #self.spark_session.conf.set(f"pipeline.{target_view.replace(' ', '_')}.load_id", load_id)
-        self.save_load_id(target_view, load_id)
         self.save_load_info(target_view, view_alias, load_id)
         self.log('Operations', { "Content": f'load path:{target_path}' })
         self.flush_log()
@@ -362,17 +454,6 @@ class Pipeline(LogService):
             schema_dir = os.path.join(self.config["Data"]["Schema"]["Path"], table)
             self.delete_all_files_and_folders(schema_dir)
 
-    def save_load_id(self, table, value):
-        key = f"task.{table.replace(' ', '_')}.load_id"
-        self.spark_session.conf.set(key, value)
-        self.databricks_dbutils.jobs.taskValues.set(key = key, value = value)
-
-    def get_load_id(self, task, table):
-        key = f"task.{table.replace(' ', '_')}.load_id"
-        load_id = self.databricks_dbutils.jobs.taskValues.get(taskKey = task, key = key, debugValue = "")
-        self.spark_session.conf.set(key, load_id)
-        return load_id
-
     def save_load_info(self, table, view, load_id):
         load_info = {"table":table, "view": view, "load_id":load_id}
         self.databricks_dbutils.jobs.taskValues.set(key = "task_load_info", value = json.dumps(load_info))
@@ -384,11 +465,11 @@ class Pipeline(LogService):
         if self.job is not None and self.task is not None:
             depend_on_task_keys = [depend_on.task_key for depend_on in self.task.depends_on]
 
-            schema = StructType([
+            load_info_schema = StructType([
                 StructField("table", StringType(), True),
                 StructField("load_id", StringType(), True)
             ])
-            df_load_info = self.spark_session.createDataFrame([], schema)
+            df_load_info = self.spark_session.createDataFrame([], load_info_schema)
             df_load_info.createOrReplaceTempView('load_info')
 
             for task_key in depend_on_task_keys:
@@ -398,7 +479,7 @@ class Pipeline(LogService):
                     print(load_info_value)
                     if load_info_value:
                         load_info = json.loads(load_info_value)
-                        df_load_info = df_load_info.union(self.spark_session.createDataFrame([(load_info["table"], load_info["load_id"])], schema))
+                        df_load_info = df_load_info.union(self.spark_session.createDataFrame([(load_info["table"], load_info["load_id"])], load_info_schema))
                         df_load_info.createOrReplaceTempView('load_info')
 
                         query = f"""
@@ -425,8 +506,6 @@ class Pipeline(LogService):
                         #load_info["data"] = temp_df
                         all_load_info[f"{temp_view}_info"] = SimpleNamespace(**load_info)
                         all_load_info[temp_view] = temp_df 
-
-                        schema.get("xxxx")
 
                         #exec(f'{load_info["table"]}_load_id = "{load_info["load_id"]}"')
                         #spark.createDataFrame([(load_info["table"], load_info["load_id"])], ("table", "load_id")).createOrReplaceTempView('load_info')
