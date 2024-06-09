@@ -8,7 +8,8 @@
     "Job":{
         "Cluster": {
             "Path": "/Volumes/evacatalog/workflow/config/cluster/",
-            "PipelineLibaray": "/Volumes/evacatalog/workflow/init-scripts/DatabricksHelper-0.1.0-py3-none-any.whl"
+            "PipelineLibaray": "/Volumes/evacatalog/workflow/init-scripts/DatabricksHelper-0.1.0-py3-none-any.whl",
+            "MaxParallelTasks": 10
         }
     },
     "Data": {
