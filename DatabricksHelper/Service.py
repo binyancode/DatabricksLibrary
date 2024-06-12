@@ -108,6 +108,30 @@ class PipelineService:
             import IPython
             self.databricks_dbutils = IPython.get_ipython().user_ns["dbutils"]
 
+    def init_cluster(self):
+        cluster_id = self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext().clusterId().get()
+        self.cluster = self.workspace.clusters.get(cluster_id)
+
+    def init_job_task(self):
+        if "currentRunId" in self.context:
+            task_run_id = self.context["currentRunId"]
+            if task_run_id != "" and task_run_id is not None:
+                run = self.workspace.jobs.get_run(task_run_id)
+                try:
+                    self.job = self.workspace.jobs.get(run.job_id)
+                    tasks = [task for task in self.job.settings.tasks if task.task_key == run.run_name]
+                    if len(tasks) > 0:
+                        self.task = tasks[0]
+                    else:
+                        self.task = None
+                except Exception as ex:
+                    print(f"Cannot found job: {ex}")
+                    self.job = None
+                    self.task = None
+            else:
+                self.job = None
+                self.task = None
+
     def __init__(self, spark):
         self.session_id = str(uuid.uuid4())
         self.spark_session = spark
@@ -141,27 +165,6 @@ class PipelineService:
         #     }
         # }
         self.context = context["attributes"]
-        print(context)
-        if "currentRunId" in self.context:
-            task_run_id = self.context["currentRunId"]
-            if task_run_id != "" and task_run_id is not None:
-                run = self.workspace.jobs.get_run(task_run_id)
-                try:
-                    self.job = self.workspace.jobs.get(run.job_id)
-                    print(f"Current job: {self.job.settings.name}")
-                    tasks = [task for task in self.job.settings.tasks if task.task_key == run.run_name]
-                    if len(tasks) > 0:
-                        self.task = tasks[0]
-                        print(f"Current task: {self.task.task_key}")
-                    else:
-                        self.task = None
-                except Exception as ex:
-                    print(f"Cannot found job: {ex}")
-                    self.job = None
-                    self.task = None
-            else:
-                self.job = None
-                self.task = None
         # jobGroupId = self.databricks_dbutils.notebook.entry_point.getJobGroupId()
         # print(jobGroupId)
         # match = re.search('run-(.*?)-action', jobGroupId)
@@ -250,55 +253,97 @@ class StreamingListener(StreamingQueryListener, LogService):
     def __init__(self, spark):
         LogService.__init__(self, spark)
 
-class Pipeline(LogService):
-    streaming_listener = None
+class PipelineCluster(LogService):
+    def get_job_id(self, job_name:str) -> int:
+        if job_name in self.jobs:
+            return self.jobs[job_name]
+        for job in self.workspace.jobs.list():
+            if job_name == job.settings.name:
+                return job.job_id
+        return -1
+    
+    # def max_dop_tasks(self, tasks) -> int:
+    #     task_dict = {task['task_key']: task for task in tasks}
+    #     root_tasks = [task for task in tasks if not task.get('depends_on')]
 
-    def run(self, run_id:str, job_name:str, params = None):
-        if params is not None and isinstance(params, str):
-            params = json.loads(params)
-        if self.default_catalog:
-            if params is None:
-                params = {}
-            params["default_catalog"] = self.default_catalog
-        job_id = self.get_job_id(job_name)
-        self.init_job_cluster(job_name)
-        run = self.workspace.jobs.run_now_and_wait(job_id, notebook_params=params)
-        
-        result_dict = self.deep_dict(run)
-        result_dict["run_id"] = run_id
-        self.log("JobRuns", result_dict)
-        self.log("Operations", { "Content": f'run job:{job_name}({job_id})' })
-        self.flush_log()
-        print(f"{json.dumps(result_dict)}\n")
-        return result_dict
+    #     max_dop = 0
 
-    def max_dop_tasks(self, tasks):
+    #     while root_tasks:
+    #         n = len(root_tasks)
+    #         if  max_dop < n:
+    #             max_dop = n
+    #         #max_dop = max(max_dop, n)
+    #         for _ in range(n):
+    #             task = root_tasks.pop(0)
+    #             for dependent_task in tasks:
+    #                 if dependent_task.get('depends_on') is not None:
+    #                     if any(dependency['task_key'] == task['task_key'] for dependency in dependent_task.get('depends_on')):
+    #                         root_tasks.append(dependent_task)
+
+    #     return max_dop
+    def max_dop_tasks(self, tasks) -> int:
         task_dict = {task['task_key']: task for task in tasks}
         root_tasks = [task for task in tasks if not task.get('depends_on')]
 
         max_dop = 0
 
+        temp_tasks = [root_task["task_key"] for root_task in root_tasks]
+
         while root_tasks:
             n = len(root_tasks)
+            #print(n)
             if  max_dop < n:
                 max_dop = n
-            #max_dop = max(max_dop, n)
+            #
+            # task0
+            # └── task5
+            #     ├── task6
+            #     └── task7
+
+            # task1
+            # ├── task2
+            # │   ├── task2.1
+            # │   └── task4
+            # │       └── task4.1
+            # └── task3
+            #     └── task4
+            #         └── task4.1
+            #遍历父亲，将父亲替换为孩子，如果孩子有多个父亲，都替换
+            # ['task0', 'task1']
+            # ['task2', 'task3', 'task5']
+            # ['task2.1', 'task4', 'task6', 'task7', 'task4']
+            # ['task2.1', 'task6', 'task7', 'task4', 'task4.1']
+            # ['task2.1', 'task6', 'task7', 'task4', 'task4.1']
+            #
+
+            for temp_task in [temp_task for temp_task in list(set(temp_tasks))]:
+                for root_task in root_tasks:
+                    depends_on = root_task.get('depends_on')
+                    if depends_on and temp_task in [depends_on_key["task_key"] for depends_on_key in depends_on]:
+
+                        #if not root_task["task_key"] in temp_tasks:
+                        temp_tasks.append(root_task["task_key"])
+                            
+                        if temp_task in temp_tasks:
+                            temp_tasks.remove(temp_task)
+            print(temp_tasks)
             for _ in range(n):
                 task = root_tasks.pop(0)
+                #print(task["task_key"])
                 for dependent_task in tasks:
                     if dependent_task.get('depends_on') is not None:
                         if any(dependency['task_key'] == task['task_key'] for dependency in dependent_task.get('depends_on')):
-                            root_tasks.append(dependent_task)
-
-        return max_dop
-
-    def get_job_parallel_tasks(self, job_name):
+                            if not any(dependent_task['task_key'] == root_task['task_key'] for root_task in root_tasks):
+                                root_tasks.append(dependent_task)
+        #temp_tasks = list(set(temp_tasks))
+        print(temp_tasks)
+        return len(temp_tasks)
+    
+    def get_job_parallel_tasks(self, job_name) -> int:
         job = self.workspace.jobs.get(self.get_job_id(job_name))
         return self.max_dop_tasks([task.as_dict() for task in job.settings.tasks])
 
-
-    def get_current_parallel_tasks(self):
-        cluster_id = self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext().clusterId().get()
+    def get_current_parallel_tasks(self, cluster_id) -> int:
         max_dop = 0
         for base_run in self.workspace.jobs.list_runs(run_type=ListRunsRunType.JOB_RUN):
             if base_run.state.life_cycle_state not in [RunLifeCycleState.TERMINATED, RunLifeCycleState.INTERNAL_ERROR, RunLifeCycleState.SKIPPED, RunLifeCycleState.TERMINATING]:
@@ -311,15 +356,15 @@ class Pipeline(LogService):
                 max_dop += self.max_dop_tasks([task.as_dict() for task in tasks])
         return max_dop
 
-
-
-    def init_job_cluster(self, job_name):
+    def assign_job_cluster(self, job_name):
         job = None
         for base_job in [base_job for base_job in self.workspace.jobs.list() if base_job.settings.name == job_name]:
             job = self.workspace.jobs.get(base_job.job_id)
         if not job:
             return
-        
+
+        print(f"Entry cluster: {self.cluster.cluster_id}({self.cluster.cluster_name})")
+
         job_cluster_file = os.path.join(self.config["Job"]["Cluster"]["Path"], self.workspace_id, f"{job_name}.json")
         if os.path.exists(job_cluster_file):
             print(f"The job cluster file '{job_cluster_file}' exists.")
@@ -327,23 +372,25 @@ class Pipeline(LogService):
                 job_cluster_json = json.load(file)
 
                 pipeline_library = self.config["Job"]["Cluster"]["PipelineLibaray"]
-                max_parallel_tasks = self.config["Job"]["Cluster"]["MaxParallelTasks"]
-                current_cluster_id = self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext().clusterId().get()
+                max_parallel_tasks = self.config["Job"]["Cluster"]["MaxParallelTaskCountForEntryCluster"]
+
 
                 #判断是否使用当前cluster运算
                 if "automatic_cluster_allocation" in job_cluster_json:
                     automatic_cluster_allocation = job_cluster_json["automatic_cluster_allocation"]
                     print(f"Automatic cluster allocation: {automatic_cluster_allocation}")
-                    current_parallel_tasks = self.get_current_parallel_tasks()
+                    current_parallel_tasks = self.get_current_parallel_tasks(self.cluster.cluster_id)
                     job_parallel_tasks = self.get_job_parallel_tasks(job_name)
-                    print(f"Max parallel tasks: {max_parallel_tasks} Current parallel tasks: {current_parallel_tasks}, Job parallel tasks: {job_parallel_tasks}")
-                    if automatic_cluster_allocation and max_parallel_tasks > current_parallel_tasks + job_parallel_tasks:
+                    print(f"Max parallel tasks: {max_parallel_tasks}, Current parallel tasks: {current_parallel_tasks}, Job parallel tasks: {job_parallel_tasks}")
+                    if automatic_cluster_allocation and max_parallel_tasks >= current_parallel_tasks + job_parallel_tasks:
                         for task in job.settings.tasks:
-                            task.existing_cluster_id = current_cluster_id
+                            task.existing_cluster_id = self.cluster.cluster_id
                             task.job_cluster_key = None
                             self.workspace.jobs.reset(job.job_id, job.settings)
-                            print(f"Job: {job_name} Task: {task.task_key} is allocated: {current_cluster_id}")
+                            print(f"Job: {job_name} Task: {task.task_key} is allocated: {self.cluster.cluster_id}({self.cluster.cluster_name})")
                         return
+                    else:
+                        print(f"Due to tasks assgined to current cluster: {self.cluster.cluster_id}({self.cluster.cluster_name}) exceed preset maximum degree of parallelism, job: {job_name} is not allocated: {self.cluster.cluster_id}({self.cluster.cluster_name})")
                     
                 if "job_clusters" in job_cluster_json:
                     for job_cluster_key, job_cluster_def in job_cluster_json["job_clusters"].items():
@@ -380,18 +427,41 @@ class Pipeline(LogService):
                                     task.libraries.remove(library)
                                 task.libraries.append({"whl":pipeline_library})
                                 if existing_cluster_id == "" or existing_cluster_id is None:
-                                    existing_cluster_id = current_cluster_id
+                                    existing_cluster_id = self.cluster.cluster_id
                                 task.existing_cluster_id = existing_cluster_id
                                 self.workspace.jobs.reset(job.job_id, job.settings)
                                 print(f"Apply existing cluster {existing_cluster_id} for task: {task.task_key}")
         else:
             print(f"The job cluster file '{job_cluster_file}' does not exist.")
-
-    def get_job_id(self, job_name:str) -> int:
+    
+    def __init__(self, spark):
+        super().__init__(spark)
+        self.init_cluster()
+        self.jobs = {}
         for job in self.workspace.jobs.list():
-            if job_name == job.settings.name:
-                return job.job_id
-        return -1
+            self.jobs[job.settings.name] = job.job_id
+
+class Pipeline(LogService):
+    streaming_listener = None
+
+    def run(self, run_id:str, job_name:str, params = None):
+        if params is not None and isinstance(params, str):
+            params = json.loads(params)
+        if self.default_catalog:
+            if params is None:
+                params = {}
+            params["default_catalog"] = self.default_catalog
+        job_id = self.pipeline_cluster.get_job_id(job_name)
+        self.pipeline_cluster.assign_job_cluster(job_name)
+        run = self.workspace.jobs.run_now_and_wait(job_id, notebook_params=params)
+        
+        result_dict = self.deep_dict(run)
+        result_dict["run_id"] = run_id
+        self.log("JobRuns", result_dict)
+        self.log("Operations", { "Content": f'run job:{job_name}({job_id})' })
+        self.flush_log()
+        print(f"{json.dumps(result_dict)}\n")
+        return result_dict
 
     def read_data(self, target_table, source_file, file_format, reader_options = None):
         checkpoint_dir = os.path.join(self.config["Data"]["Checkpoint"]["Path"], target_table)
@@ -682,6 +752,13 @@ class Pipeline(LogService):
 
     def __init__(self, default_catalog = None, spark = None):
         super().__init__(spark)
+        self.init_job_task()
+        self.pipeline_cluster = PipelineCluster(self.spark_session)
+        print(self.context)
+        #print(self.pipeline_cluster.cluster)
+        print(f"Current cluster: {self.pipeline_cluster.cluster.cluster_id}({self.pipeline_cluster.cluster.cluster_name})")
+        print(f"Current job: {self.job.settings.name}") if self.job else print("Current job: None")
+        print(f"Current task: {self.task.task_key}") if self.task else print("Current task: None")
         self.default_catalog = None
         if default_catalog:
             self.default_catalog = default_catalog
@@ -692,7 +769,7 @@ class Pipeline(LogService):
             print(f"add {Pipeline.streaming_listener}")
 
 
-
+__all__ = ['Pipeline', 'Reload']
 # if 'streaming_listeners' not in globals():
 #   print("not")
 #   streaming_listeners = []
