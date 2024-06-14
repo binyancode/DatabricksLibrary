@@ -336,7 +336,7 @@ class PipelineCluster(LogService):
                             if not any(dependent_task['task_key'] == root_task['task_key'] for root_task in root_tasks):
                                 root_tasks.append(dependent_task)
         #temp_tasks = list(set(temp_tasks))
-        print(temp_tasks)
+        #print(temp_tasks)
         return len(temp_tasks)
     
     def get_job_parallel_tasks(self, job_name) -> int:

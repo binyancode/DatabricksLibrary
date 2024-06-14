@@ -262,26 +262,83 @@ class PipelineCluster(LogService):
                 return job.job_id
         return -1
     
+    # def max_dop_tasks(self, tasks) -> int:
+    #     task_dict = {task['task_key']: task for task in tasks}
+    #     root_tasks = [task for task in tasks if not task.get('depends_on')]
+
+    #     max_dop = 0
+
+    #     while root_tasks:
+    #         n = len(root_tasks)
+    #         if  max_dop < n:
+    #             max_dop = n
+    #         #max_dop = max(max_dop, n)
+    #         for _ in range(n):
+    #             task = root_tasks.pop(0)
+    #             for dependent_task in tasks:
+    #                 if dependent_task.get('depends_on') is not None:
+    #                     if any(dependency['task_key'] == task['task_key'] for dependency in dependent_task.get('depends_on')):
+    #                         root_tasks.append(dependent_task)
+
+    #     return max_dop
     def max_dop_tasks(self, tasks) -> int:
         task_dict = {task['task_key']: task for task in tasks}
         root_tasks = [task for task in tasks if not task.get('depends_on')]
 
         max_dop = 0
 
+        temp_tasks = [root_task["task_key"] for root_task in root_tasks]
+
         while root_tasks:
             n = len(root_tasks)
+            #print(n)
             if  max_dop < n:
                 max_dop = n
-            #max_dop = max(max_dop, n)
+            #
+            # task0
+            # └── task5
+            #     ├── task6
+            #     └── task7
+
+            # task1
+            # ├── task2
+            # │   ├── task2.1
+            # │   └── task4
+            # │       └── task4.1
+            # └── task3
+            #     └── task4
+            #         └── task4.1
+            #遍历父亲，将父亲替换为孩子，如果孩子有多个父亲，都替换
+            # ['task0', 'task1']
+            # ['task2', 'task3', 'task5']
+            # ['task2.1', 'task4', 'task6', 'task7', 'task4']
+            # ['task2.1', 'task6', 'task7', 'task4', 'task4.1']
+            # ['task2.1', 'task6', 'task7', 'task4', 'task4.1']
+            #
+
+            for temp_task in [temp_task for temp_task in list(set(temp_tasks))]:
+                for root_task in root_tasks:
+                    depends_on = root_task.get('depends_on')
+                    if depends_on and temp_task in [depends_on_key["task_key"] for depends_on_key in depends_on]:
+
+                        #if not root_task["task_key"] in temp_tasks:
+                        temp_tasks.append(root_task["task_key"])
+                            
+                        if temp_task in temp_tasks:
+                            temp_tasks.remove(temp_task)
+            print(temp_tasks)
             for _ in range(n):
                 task = root_tasks.pop(0)
+                #print(task["task_key"])
                 for dependent_task in tasks:
                     if dependent_task.get('depends_on') is not None:
                         if any(dependency['task_key'] == task['task_key'] for dependency in dependent_task.get('depends_on')):
-                            root_tasks.append(dependent_task)
-
-        return max_dop
-
+                            if not any(dependent_task['task_key'] == root_task['task_key'] for root_task in root_tasks):
+                                root_tasks.append(dependent_task)
+        #temp_tasks = list(set(temp_tasks))
+        #print(temp_tasks)
+        return len(temp_tasks)
+    
     def get_job_parallel_tasks(self, job_name) -> int:
         job = self.workspace.jobs.get(self.get_job_id(job_name))
         return self.max_dop_tasks([task.as_dict() for task in job.settings.tasks])
@@ -405,129 +462,6 @@ class Pipeline(LogService):
         self.flush_log()
         print(f"{json.dumps(result_dict)}\n")
         return result_dict
-
-    # def max_dop_tasks(self, tasks):
-    #     task_dict = {task['task_key']: task for task in tasks}
-    #     root_tasks = [task for task in tasks if not task.get('depends_on')]
-
-    #     max_dop = 0
-
-    #     while root_tasks:
-    #         n = len(root_tasks)
-    #         if  max_dop < n:
-    #             max_dop = n
-    #         #max_dop = max(max_dop, n)
-    #         for _ in range(n):
-    #             task = root_tasks.pop(0)
-    #             for dependent_task in tasks:
-    #                 if dependent_task.get('depends_on') is not None:
-    #                     if any(dependency['task_key'] == task['task_key'] for dependency in dependent_task.get('depends_on')):
-    #                         root_tasks.append(dependent_task)
-
-    #     return max_dop
-
-    # def get_job_parallel_tasks(self, job_name):
-    #     job = self.workspace.jobs.get(self.get_job_id(job_name))
-    #     return self.max_dop_tasks([task.as_dict() for task in job.settings.tasks])
-
-
-    # def get_current_parallel_tasks(self):
-    #     cluster_id = self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext().clusterId().get()
-    #     max_dop = 0
-    #     for base_run in self.workspace.jobs.list_runs(run_type=ListRunsRunType.JOB_RUN):
-    #         if base_run.state.life_cycle_state not in [RunLifeCycleState.TERMINATED, RunLifeCycleState.INTERNAL_ERROR, RunLifeCycleState.SKIPPED, RunLifeCycleState.TERMINATING]:
-    #             print(base_run.state.life_cycle_state)
-    #             run = self.workspace.jobs.get_run(base_run.run_id)
-    #             #print(json.dumps(run.as_dict()))
-    #             tasks = [task for task in run.tasks if task.state.life_cycle_state not in [RunLifeCycleState.TERMINATED, RunLifeCycleState.INTERNAL_ERROR, RunLifeCycleState.SKIPPED, RunLifeCycleState.TERMINATING] and task.existing_cluster_id == cluster_id]
-    #             # for task in tasks:
-    #             #     print(task.task_key, task.state.life_cycle_state, task.depends_on)
-    #             max_dop += self.max_dop_tasks([task.as_dict() for task in tasks])
-    #     return max_dop
-
-
-
-    # def assign_job_cluster(self, job_name):
-    #     job = None
-    #     for base_job in [base_job for base_job in self.workspace.jobs.list() if base_job.settings.name == job_name]:
-    #         job = self.workspace.jobs.get(base_job.job_id)
-    #     if not job:
-    #         return
-        
-    #     job_cluster_file = os.path.join(self.config["Job"]["Cluster"]["Path"], self.workspace_id, f"{job_name}.json")
-    #     if os.path.exists(job_cluster_file):
-    #         print(f"The job cluster file '{job_cluster_file}' exists.")
-    #         with open(job_cluster_file, 'r') as file:
-    #             job_cluster_json = json.load(file)
-
-    #             pipeline_library = self.config["Job"]["Cluster"]["PipelineLibaray"]
-    #             max_parallel_tasks = self.config["Job"]["Cluster"]["MaxParallelTasks"]
-    #             current_cluster_id = self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext().clusterId().get()
-
-    #             #判断是否使用当前cluster运算
-    #             if "automatic_cluster_allocation" in job_cluster_json:
-    #                 automatic_cluster_allocation = job_cluster_json["automatic_cluster_allocation"]
-    #                 print(f"Automatic cluster allocation: {automatic_cluster_allocation}")
-    #                 current_parallel_tasks = self.get_current_parallel_tasks()
-    #                 job_parallel_tasks = self.get_job_parallel_tasks(job_name)
-    #                 print(f"Max parallel tasks: {max_parallel_tasks} Current parallel tasks: {current_parallel_tasks}, Job parallel tasks: {job_parallel_tasks}")
-    #                 if automatic_cluster_allocation and max_parallel_tasks >= current_parallel_tasks + job_parallel_tasks:
-    #                     for task in job.settings.tasks:
-    #                         task.existing_cluster_id = current_cluster_id
-    #                         task.job_cluster_key = None
-    #                         self.workspace.jobs.reset(job.job_id, job.settings)
-    #                         print(f"Job: {job_name} Task: {task.task_key} is allocated: {current_cluster_id}")
-    #                     return
-    #                 else:
-    #                     print(f"Due to tasks assgined to current cluster: {current_cluster_id} exceed preset maximum degree of parallelism, job: {job_name} is not allocated: {current_cluster_id}")
-                    
-    #             if "job_clusters" in job_cluster_json:
-    #                 for job_cluster_key, job_cluster_def in job_cluster_json["job_clusters"].items():
-    #                     if job.settings.job_clusters is not None:
-    #                         for cluster in [job_cluster for job_cluster in job.settings.job_clusters if job_cluster.job_cluster_key == job_cluster_key]:
-    #                             job.settings.job_clusters.remove(cluster)
-    #                     else:
-    #                         job.settings.job_clusters = []
-    #                     job.settings.job_clusters.append(JobCluster(job_cluster_key).from_dict(job_cluster_def))
-    #                     self.workspace.jobs.reset(job.job_id, job.settings)
-    #                     print(f"Apply job cluster {job_cluster_key} for job: {job_name}")
-
-
-    #             for task in job.settings.tasks:
-    #                 if "task_job_cluster" in job_cluster_json:
-    #                     for task_key, job_cluster_key in job_cluster_json["task_job_cluster"].items():
-    #                         if task.task_key == task_key:
-    #                             task.job_cluster_key = job_cluster_key
-    #                             if task.libraries is None:
-    #                                 task.libraries = []
-    #                             for library in [library for library in task.libraries if "whl" in library and library["whl"] == pipeline_library]:
-    #                                 task.libraries.remove(library)
-    #                             task.libraries.append({"whl": pipeline_library})
-    #                             self.workspace.jobs.reset(job.job_id, job.settings)
-    #                             print(f"Apply job cluster {job_cluster_key} for task: {task.task_key}")
-
-    #                 if "task_cluster" in job_cluster_json:
-    #                     for task_key, existing_cluster_id in job_cluster_json["task_cluster"].items():
-    #                         if task.task_key == task_key:
-    #                             task.job_cluster_key = None
-    #                             if task.libraries is None:
-    #                                 task.libraries = []
-    #                             for library in [library for library in task.libraries if "whl" in library and library["whl"] == pipeline_library]:
-    #                                 task.libraries.remove(library)
-    #                             task.libraries.append({"whl":pipeline_library})
-    #                             if existing_cluster_id == "" or existing_cluster_id is None:
-    #                                 existing_cluster_id = current_cluster_id
-    #                             task.existing_cluster_id = existing_cluster_id
-    #                             self.workspace.jobs.reset(job.job_id, job.settings)
-    #                             print(f"Apply existing cluster {existing_cluster_id} for task: {task.task_key}")
-    #     else:
-    #         print(f"The job cluster file '{job_cluster_file}' does not exist.")
-
-    # def get_job_id(self, job_name:str) -> int:
-    #     for job in self.workspace.jobs.list():
-    #         if job_name == job.settings.name:
-    #             return job.job_id
-    #     return -1
 
     def read_data(self, target_table, source_file, file_format, reader_options = None):
         checkpoint_dir = os.path.join(self.config["Data"]["Checkpoint"]["Path"], target_table)
