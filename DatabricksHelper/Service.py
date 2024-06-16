@@ -1,5 +1,5 @@
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.jobs import RunLifeCycleState, ListRunsRunType, Library, JobCluster, JobSettings, JobTaskSettings, NotebookTask,NotebookTaskSource
+from databricks.sdk.service.jobs import RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, ListRunsRunType, Library, JobCluster, JobSettings, JobTaskSettings, NotebookTask,NotebookTaskSource
 from pyspark.sql.functions import explode, col, lit, count, max, from_json
 from pyspark.sql.types import StructType, StructField, StringType,IntegerType
 from pyspark.sql import DataFrame, Observation
@@ -132,9 +132,10 @@ class PipelineService:
                 self.job = None
                 self.task = None
 
-    def __init__(self, spark):
+    def __init__(self, run_id, spark):
         self.session_id = str(uuid.uuid4())
         self.spark_session = spark
+        self.run_id = run_id
         #self.databricks_dbutils = dbutils
         self.init_databricks()
         with open(os.environ.get("DATABRICKS_CONFIG"), 'r') as file:
@@ -198,42 +199,40 @@ class LogService(PipelineService):
             self.flush_log()
 
     def flush_log(self):
-        for key, value in self.logs.items():
-                log_dir = os.path.join(self.config["Log"]["Path"], key, f"{datetime.now().strftime('%Y%m')}")
-                if not os.path.exists(log_dir):
-                    try:
-                        os.makedirs(log_dir)
-                    except OSError as e:
-                        print(e)
-                        pass
-                log_file = os.path.join(log_dir, f"{f'{time.time():0<{18}}'.replace('.', '')}-{self.session_id.replace('-', '')}-{str(uuid.uuid4()).replace('-', '')}.json")
-                with open(log_file, 'a') as file:
-                    file.write(json.dumps(value))
-        self.logs = {}
+        log_dir = self.config["Log"]["Path"]
+        if not os.path.exists(log_dir):
+            try:
+                os.makedirs(log_dir)
+            except OSError as e:
+                print(e)
+                pass
+        log_file = os.path.join(log_dir, f"{self.run_id}.json")
+        with open(log_file, 'w') as file:
+            file.write(json.dumps(self.logs, indent=4))
 
-    def query_log(self, category, month):
-        log_dir = os.path.join(self.config["Log"]["Path"], category, f"{month}")
-        if os.path.exists(log_dir):
-            return self.spark_session.read.format("json").load(log_dir)
+    def get_last_log(self, category, path):
+        if category in self.logs:
+            if len(self.logs[category]) > 0:
+                log = self.logs[category][-1]
+                for prop in path:
+                    if prop in log:
+                        log = log[prop]
+                    else:
+                        return None
+                return log
+        return None
 
-    def job_log(self, month):
-        return self.query_log("JobRuns", month)
-  
-    def ops_log(self, month):
-        return self.query_log("Operations", month)
-  
-    def loader_log(self, month):
-        return self.query_log("StreamingProgress", month)
-  
-    def tick_log(self, month):
-        return self.query_log("Ticks", month)
-  
-    def tick(self, func, flush = False):
-        self.log("Ticks", { "func":func }, flush)
+    def read_log(self):
+        log_file = os.path.join(self.config["Log"]["Path"], f"{self.run_id}.json")
+        if os.path.exists(log_file):
+            with open(log_file, 'r') as file:
+                return json.load(file)
+        return {}
 
-    def __init__(self, spark):
-        super().__init__(spark)
-        self.logs = {}
+    def __init__(self, run_id, spark = None):
+        super().__init__(run_id, spark)
+        self.logs = self.read_log()
+
 
 class StreamingListener(StreamingQueryListener, LogService):
     def onQueryStarted(self, event):
@@ -241,7 +240,7 @@ class StreamingListener(StreamingQueryListener, LogService):
 
     def onQueryProgress(self, event):
         print(event.progress.json)
-        self.log('StreamingProgress', event.progress.json, True)
+        self.log('StreamingProgress', event.progress.json)
         #print(self.log)
         row = event.progress.observedMetrics.get("metrics")
         if row is not None:
@@ -250,8 +249,8 @@ class StreamingListener(StreamingQueryListener, LogService):
     def onQueryTerminated(self, event):
         print(f"stream terminated!")
 
-    def __init__(self, spark):
-        LogService.__init__(self, spark)
+    def __init__(self, run_id, spark):
+        LogService.__init__(self,  run_id, spark)
 
 class PipelineCluster(LogService):
     def get_job_id(self, job_name:str) -> int:
@@ -434,8 +433,8 @@ class PipelineCluster(LogService):
         else:
             print(f"The job cluster file '{job_cluster_file}' does not exist.")
     
-    def __init__(self, spark):
-        super().__init__(spark)
+    def __init__(self, run_id, spark):
+        super().__init__(run_id, spark)
         self.init_cluster()
         self.jobs = {}
         for job in self.workspace.jobs.list():
@@ -444,24 +443,49 @@ class PipelineCluster(LogService):
 class Pipeline(LogService):
     streaming_listener = None
 
-    def run(self, run_id:str, job_name:str, params = None):
+    def repair_run(self, job_name:str):
+        last_job_run_result = self.get_last_log("JobRunResults", ["state", "result_state"])
+        last_job_run_id = self.get_last_log("JobRunResults", ["run_id"])
+        latest_repair_id = self.get_last_log("JobRuns", ["repair_id"])
+        if last_job_run_id and last_job_run_result in ("FAILED", "TIMEDOUT", "CANCELED"):
+            self.log("Operations", { "Content": f're-run job:{job_name}' })
+            wait_run = self.workspace.jobs.repair_run(last_job_run_id, latest_repair_id=latest_repair_id, rerun_all_failed_tasks=True)
+            return self.running(wait_run)
+        else:
+            print(f"Skip re-running the job {job_name} with status {last_job_run_result}.")
+            return None
+
+    def running(self, wait_run):
+        self.log("JobRuns", wait_run.response.as_dict(), True)
+        def run_callback(run_return):
+            if run_return.state.life_cycle_state != RunLifeCycleState.RUNNING:
+                result_dict = run_return.as_dict()
+                self.log("JobRunResults", result_dict, True)  
+        run = wait_run.result(callback=run_callback) 
+        result_dict = run.as_dict()
+        self.log("JobRunResults", result_dict)
+        self.flush_log()
+        print(f"{json.dumps(result_dict)}\n")
+        return result_dict
+
+    def run(self, job_name:str, params = None):
+        
+        job_id = self.pipeline_cluster.get_job_id(job_name)
+        self.pipeline_cluster.assign_job_cluster(job_name)
+
+        if self.get_last_log("JobRunResults", ["run_id"]):
+            return self.repair_run(job_name)
+
         if params is not None and isinstance(params, str):
             params = json.loads(params)
         if self.default_catalog:
             if params is None:
                 params = {}
             params["default_catalog"] = self.default_catalog
-        job_id = self.pipeline_cluster.get_job_id(job_name)
-        self.pipeline_cluster.assign_job_cluster(job_name)
-        run = self.workspace.jobs.run_now_and_wait(job_id, notebook_params=params)
-        
-        result_dict = self.deep_dict(run)
-        result_dict["run_id"] = run_id
-        self.log("JobRuns", result_dict)
-        self.log("Operations", { "Content": f'run job:{job_name}({job_id})' })
-        self.flush_log()
-        print(f"{json.dumps(result_dict)}\n")
-        return result_dict
+        self.log("Operations", { "Content": f'run job:{job_name}' })
+        wait_run = self.workspace.jobs.run_now(job_id, notebook_params=params)
+         
+        return self.running(wait_run)
 
     def read_data(self, target_table, source_file, file_format, reader_options = None):
         checkpoint_dir = os.path.join(self.config["Data"]["Checkpoint"]["Path"], target_table)
@@ -543,6 +567,7 @@ class Pipeline(LogService):
         self.log('Operations', { "Content": f'load table:{target_table}' })
         self.flush_log()
         self.wait_loading_data()
+        self.flush_log()
         return load_id
 
     def load_view(self, target_view, target_path, source_file, file_format, view_alias = None, reader_options = None, transform = None, reload_view = False):
@@ -593,6 +618,7 @@ class Pipeline(LogService):
         self.flush_log()
         self.wait_loading_data()
         self.view(target_view, target_path, 'delta')
+        self.flush_log()
         #self.spark_session.sql(f"CREATE OR REPLACE TEMPORARY VIEW `{target_view}` USING parquet OPTIONS (path '{target_path}')")
         return load_id
 
@@ -723,8 +749,22 @@ class Pipeline(LogService):
     def set_default_catalog(self, catalog):
         self.spark_session.catalog.setCurrentCatalog(catalog)
 
+    def finish_load(self, table, state = 'SUCCESS'):
+        self.spark_session.sql(f"""
+                               CREATE TABLE IF NOT EXISTS {table} (
+                                    table_name STRING,
+                                    load_id STRING,
+                                    load_state STRING,
+                                    load_time TIMESTAMP
+                                )
+                               INSERT INTO {table}
+                                SELECT `table`, load_id, '{state}', current_timestamp()
+                                FROM load_info
+                               """).collect()
+        pass
+
     def clear_table(self, table_names, earlist_time):
-        self.log('Operations', { "Content": f'clear table:{table_names} older than {earlist_time}' })
+        self.log('Operations', { "Content": f'clear table:{table_names} older than {earlist_time}' }, True)
         for table_name in table_names:
             df = self.spark_session.sql(f"SHOW PARTITIONS {table_name}")
             df.createOrReplaceTempView("partitions")
@@ -750,10 +790,10 @@ class Pipeline(LogService):
         #           print(f"Directory: {unquote(dirname)[11:30]}, Parent directory: {unquote(parent_dirname)}")
         #           self.delete_all_files_and_folders(parent_dirname)
 
-    def __init__(self, default_catalog = None, spark = None):
-        super().__init__(spark)
+    def __init__(self, run_id, default_catalog = None, spark = None):
+        super().__init__(run_id, spark)
         self.init_job_task()
-        self.pipeline_cluster = PipelineCluster(self.spark_session)
+        self.pipeline_cluster = PipelineCluster(run_id, self.spark_session)
         print(self.context)
         #print(self.pipeline_cluster.cluster)
         print(f"Current cluster: {self.pipeline_cluster.cluster.cluster_id}({self.pipeline_cluster.cluster.cluster_name})")
@@ -764,7 +804,7 @@ class Pipeline(LogService):
             self.default_catalog = default_catalog
             self.set_default_catalog(self.default_catalog)
         if Pipeline.streaming_listener is None:
-            Pipeline.streaming_listener = StreamingListener(spark)
+            Pipeline.streaming_listener = StreamingListener(run_id, spark)
             self.spark_session.streams.addListener(Pipeline.streaming_listener)
             print(f"add {Pipeline.streaming_listener}")
 
