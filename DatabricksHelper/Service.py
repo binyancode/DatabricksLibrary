@@ -1,5 +1,6 @@
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.jobs import RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, ListRunsRunType, Library, JobCluster, JobSettings, JobTaskSettings, NotebookTask,NotebookTaskSource
+from databricks.sdk.service.compute import ClusterDetails
+from databricks.sdk.service.jobs import Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, ListRunsRunType, Library, JobCluster, JobSettings, JobTaskSettings, NotebookTask,NotebookTaskSource
 from pyspark.sql.functions import explode, col, lit, count, max, from_json
 from pyspark.sql.types import StructType, StructField, StringType,IntegerType
 from pyspark.sql import DataFrame, Observation, SparkSession
@@ -11,7 +12,7 @@ from urllib.parse import unquote
 from enum import IntFlag
 from types import SimpleNamespace
 from types import MethodType
-from typing import Callable
+from typing import Callable, Optional
 import uuid
 import json
 import os
@@ -54,8 +55,8 @@ class PipelineAPI:
     def get_job_run(self, run_id, api_version = "2.1"):
         return self.get(f"/api/{api_version}/jobs/runs/get", data={"run_id":run_id, "include_history":True})
 
-    def __init__(self, host, token, protocol = "https://") -> None:
-        self.host = f"{protocol}{host}"
+    def __init__(self, host, token, protocol = "https") -> None:
+        self.host = f"{protocol}://{host}"
         self.token = token
 
 class PipelineService:
@@ -126,7 +127,7 @@ class PipelineService:
     def _init_databricks(self):
         if self.spark_session is None:
             import IPython
-            self.spark_session:SparkSession = IPython.get_ipython().user_ns["spark"]
+            self.spark_session = IPython.get_ipython().user_ns["spark"]
 
         self.databricks_dbutils = None
         if self.spark_session.conf.get("spark.databricks.service.client.enabled") == "true":
@@ -160,9 +161,19 @@ class PipelineService:
                 self.job = None
                 self.task = None
 
+    spark_session:SparkSession
+    cluster:ClusterDetails
+    host:str
+    workspace_id:str
+    workspace:WorkspaceClient
+    api:PipelineAPI
+    context:dict
+    job:Job
+    task:Task
+
     def __init__(self, spark:SparkSession = None):
-        self.session_id = str(uuid.uuid4())
-        self.spark_session = spark
+        self.session_id:str = str(uuid.uuid4())
+        self.spark_session:SparkSession = spark
         #self.databricks_dbutils = dbutils
         self._init_databricks()
         with open(os.environ.get("DATABRICKS_CONFIG"), 'r') as file:
@@ -260,6 +271,13 @@ class LogService:
                 return json.load(file)
         return {}
 
+    session_id:str
+    pipeline_run_id:str
+    pipeline_name:str
+    log_path:str
+    log_file:str
+    logs:dict
+
     def __init__(self, session_id, pipeline_run_id, pipeline_name, log_path):
         self.session_id = session_id
         self.pipeline_run_id = pipeline_run_id
@@ -302,6 +320,11 @@ class StreamingListener(StreamingQueryListener):
 
     def onQueryTerminated(self, event):
         print(f"stream terminated!")
+
+    logs:LogService
+    metrics:StreamingMetrics
+    progress:Callable[[StreamingQueryProgress], None]
+    max_load_rows:int
 
     def __init__(self, logs: LogService, metrics: StreamingMetrics, progress:Callable[[StreamingQueryProgress], None] = None, max_load_rows = -1):
         self.logs = logs
@@ -941,6 +964,12 @@ class Pipeline(PipelineCluster):
             Pipeline.streaming_listener = StreamingListener(self.logs, self.streaming_metrics, self.__streaming_progress, max_load_rows)
             self.spark_session.streams.addListener(Pipeline.streaming_listener)
             print(f"add {Pipeline.streaming_listener}")
+
+    pipeline_run_id:str
+    pipeline_name:str
+    default_catalog:str
+    logs:LogService
+    streaming_metrics:StreamingMetrics
 
     def __init__(self, pipeline_run_id, default_catalog = None, pipeline_name = None, spark = None):
         super().__init__(spark)
