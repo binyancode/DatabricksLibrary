@@ -4,24 +4,27 @@ import uuid
 
 # COMMAND ----------
 
-dbutils.widgets.text("run_id", str(uuid.uuid4()))
-dbutils.widgets.text("job_name", "job1")
-dbutils.widgets.text("default_catalog", "")
-dbutils.widgets.text("reader_options", "")
-dbutils.widgets.text("reload_table", "")
-run_id = dbutils.widgets.get("run_id")
+dbutils.widgets.text("pipeline_run_id", str(uuid.uuid4()))
+dbutils.widgets.text("job_name", "bp_job")
+dbutils.widgets.text("default_catalog", "evacatalog")
+dbutils.widgets.text("continue_run", "True")
+pipeline_run_id = dbutils.widgets.get("pipeline_run_id")
 job_name = dbutils.widgets.get("job_name")
 default_catalog = dbutils.widgets.get("default_catalog")
-reader_options = dbutils.widgets.get("reader_options")
-reload_table = dbutils.widgets.get("reload_table")
-print(default_catalog, job_name, reader_options)
+continue_run = dbutils.widgets.get("continue_run")
+if continue_run:
+    continue_run = bool(continue_run)
+print(f"pipeline_run_id:{pipeline_run_id}")
+print(default_catalog, job_name)
 
 # COMMAND ----------
 
-p = Pipeline(default_catalog)
-p.run(run_id, job_name, \
-        { \
-            "default_catalog":default_catalog, \
-            "reader_options":reader_options, \
-            "reload_table":reload_table \
-        })
+p = Pipeline(pipeline_run_id, default_catalog)
+
+run = p.run(job_name, \
+            { \
+                "pipeline_run_id":pipeline_run_id, \
+                "default_catalog":default_catalog \
+            }, \
+            continue_run)
+

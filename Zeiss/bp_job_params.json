@@ -1,0 +1,10 @@
+{
+    "source": "/Volumes/evacatalog/temp/dataonboarding/raw/businesspartner/",
+    "source_format": "json",
+    "table_alias": "businesspartner",
+    "reader_options": "{\"cloudFiles.schemaHints\":\"Data STRING\", \"cloudFiles.maxFileAge\":\"1 year\", \"cloudFiles.partitionColumns\":\"\"}",
+    "dynamic_source": "f\"/Volumes/evacatalog/temp/dataonboarding/raw/businesspartner/{{{','.join([(datetime.now() - relativedelta(months=i)).strftime('year=%Y/month=%m') for i in range(3)])}}}/\"",
+    "max_load_rows": "50000",
+    "reload_table": "Reload.DEFAULT",
+    "table": "temp.businesspartner"
+  }

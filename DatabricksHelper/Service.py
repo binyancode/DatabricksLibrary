@@ -1,6 +1,6 @@
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.compute import ClusterDetails
-from databricks.sdk.service.jobs import Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, ListRunsRunType, Library, JobCluster, JobSettings, JobTaskSettings, NotebookTask,NotebookTaskSource
+from databricks.sdk.service.compute import ClusterInfo
+from databricks.sdk.service.jobs import JobTaskSettings, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, ListRunsRunType, Library, JobCluster, JobSettings, JobTaskSettings, NotebookTask,NotebookTaskSource
 from pyspark.sql.functions import explode, col, lit, count, max, from_json
 from pyspark.sql.types import StructType, StructField, StringType,IntegerType
 from pyspark.sql import DataFrame, Observation, SparkSession
@@ -162,14 +162,14 @@ class PipelineService:
                 self.task = None
 
     spark_session:SparkSession
-    cluster:ClusterDetails
+    cluster:ClusterInfo
     host:str
     workspace_id:str
     workspace:WorkspaceClient
     api:PipelineAPI
     context:dict
-    job:Job
-    task:Task
+    job:Optional[Job]
+    task:Optional[JobTaskSettings]
 
     def __init__(self, spark:SparkSession = None):
         self.session_id:str = str(uuid.uuid4())
@@ -310,7 +310,7 @@ class StreamingListener(StreamingQueryListener):
         #print(event.progress.json)
         #self.logs.log('streaming_progress', event.progress.json)
         row = event.progress.observedMetrics.get("metrics")
-        if row is not None:
+        if row is not None and row.load_id is not None:
             print(f"{row.load_id}-{row.cnt} rows processed!")
 
             self.metrics.add_row_count(row.cnt)
@@ -323,7 +323,7 @@ class StreamingListener(StreamingQueryListener):
 
     logs:LogService
     metrics:StreamingMetrics
-    progress:Callable[[StreamingQueryProgress], None]
+    progress:Callable[[StreamingMetrics, StreamingQueryProgress, int], None]
     max_load_rows:int
 
     def __init__(self, logs: LogService, metrics: StreamingMetrics, progress:Callable[[StreamingQueryProgress], None] = None, max_load_rows = -1):
@@ -767,6 +767,7 @@ class Pipeline(PipelineCluster):
             self.spark_session.streams.resetTerminated() # Otherwise awaitAnyTermination() will return immediately after first stream has terminated
             self.spark_session.streams.awaitAnyTermination()
             time.sleep(0.1)
+        self.streaming_metrics.reset()
 
     def __truncate_table(self, table, clear_type):
         try:
@@ -964,6 +965,8 @@ class Pipeline(PipelineCluster):
             Pipeline.streaming_listener = StreamingListener(self.logs, self.streaming_metrics, self.__streaming_progress, max_load_rows)
             self.spark_session.streams.addListener(Pipeline.streaming_listener)
             print(f"add {Pipeline.streaming_listener}")
+        else:
+            Pipeline.streaming_listener.max_load_rows = max_load_rows
 
     pipeline_run_id:str
     pipeline_name:str
@@ -975,13 +978,13 @@ class Pipeline(PipelineCluster):
         super().__init__(spark)
 
         self.pipeline_run_id = pipeline_run_id
-        self.pipeline_name = pipeline_name
 
-        if self.pipeline_name is None:
+        if pipeline_name is None:
             if self.job is not None and self.task is not None:
-                self.pipeline_name = os.path.join("task", self.job.settings.name, self.task.task_key)
+                pipeline_name = os.path.join("task", self.job.settings.name, self.task.task_key)
             else:
-                self.pipeline_name = os.path.join("notebook", self.context["notebook_path"].strip('/'))
+                pipeline_name = os.path.join("notebook", self.context["notebook_path"].strip('/'))
+        self.pipeline_name = pipeline_name
         print(self.pipeline_name)
         self.logs = LogService(self.session_id, pipeline_run_id, self.pipeline_name, self.config["Log"]["Path"])
 
