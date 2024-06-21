@@ -2,6 +2,7 @@ LICENSE
 README.md
 setup.py
 DatabricksHelper/Service.py
+DatabricksHelper/ServiceUtils.py
 DatabricksHelper/__init__.py
 DatabricksHelper.egg-info/PKG-INFO
 DatabricksHelper.egg-info/SOURCES.txt

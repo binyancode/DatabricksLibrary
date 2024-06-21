@@ -2,7 +2,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.jobs import RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, ListRunsRunType, Library, JobCluster, JobSettings, JobTaskSettings, NotebookTask,NotebookTaskSource
 from pyspark.sql.functions import explode, col, lit, count, max, from_json
 from pyspark.sql.types import StructType, StructField, StringType,IntegerType
-from pyspark.sql import DataFrame, Observation
+from pyspark.sql import DataFrame, Observation, SparkSession
 from typing import Callable
 from pyspark.sql.streaming import StreamingQueryListener, StreamingQuery
 from pyspark.sql.streaming.listener import QueryProgressEvent, StreamingQueryProgress
@@ -20,6 +20,7 @@ import shutil
 import inspect
 import re
 import threading
+import requests
 
 class Reload(IntFlag):
     DEFAULT = 0
@@ -32,6 +33,30 @@ class DataReader:
     def __init__(self, data, load_id):
         self.data = data
         self.load_id = load_id
+
+class PipelineAPI:
+    def request(self, method, path, data = None, headers = None):
+        if headers is None:
+            headers = {}
+        if not isinstance(data, str):
+            data = json.dumps(data)
+        headers["Authorization"] = f"Bearer {self.token}"
+        headers["Content-Type"] = "application/json"
+        response = requests.request(method, f"{self.host}{path}", headers=headers, data=data)
+        return response.json()
+
+    def get(self, path, data = None, headers = None):
+        return self.request("GET", path, data, headers)
+
+    def post(self, path, data, headers = None):
+        return self.request("POST", path, data, headers = headers)
+
+    def get_job_run(self, run_id, api_version = "2.1"):
+        return self.get(f"/api/{api_version}/jobs/runs/get", data={"run_id":run_id, "include_history":True})
+
+    def __init__(self, host, token, protocol = "https://") -> None:
+        self.host = f"{protocol}{host}"
+        self.token = token
 
 class PipelineService:
     def _delete_all_files_and_folders(self, directory_path):
@@ -101,7 +126,7 @@ class PipelineService:
     def _init_databricks(self):
         if self.spark_session is None:
             import IPython
-            self.spark_session = IPython.get_ipython().user_ns["spark"]
+            self.spark_session:SparkSession = IPython.get_ipython().user_ns["spark"]
 
         self.databricks_dbutils = None
         if self.spark_session.conf.get("spark.databricks.service.client.enabled") == "true":
@@ -135,20 +160,22 @@ class PipelineService:
                 self.job = None
                 self.task = None
 
-    def __init__(self, run_id, run_name, spark):
+    def __init__(self, spark = None):
         self.session_id = str(uuid.uuid4())
         self.spark_session = spark
-        self.run_id = run_id
-        self.run_name = run_name
         #self.databricks_dbutils = dbutils
         self._init_databricks()
         with open(os.environ.get("DATABRICKS_CONFIG"), 'r') as file:
             self.config = json.load(file)
         self.host = self.spark_session.conf.get("spark.databricks.workspaceUrl")
         self.workspace_id = self.host.split('.', 1)[0]
-        self.workspace = WorkspaceClient(host=self.host, token=self.databricks_dbutils.secrets.get(scope=self.config["Workspace"]["Token"]["Scope"], key=self.config["Workspace"]["Token"]["Secret"]))
+        token = self.databricks_dbutils.secrets.get(scope=self.config["Workspace"]["Token"]["Scope"], key=self.config["Workspace"]["Token"]["Secret"])
+        self.workspace = WorkspaceClient(host=self.host, token=token)
+        self.api = PipelineAPI(host=self.host, token=token)
         context = json.loads(self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext().safeToJson())
         
+        # run_wait = self.workspace.jobs.repair_run(run_id=0, latest_repair_id=0, rerun_all_failed_tasks=True)
+        # run_wait.result()
         # {
         #     "attributes": {
         #         "non_uc_api_token": "[REDACTED]",
@@ -172,13 +199,6 @@ class PipelineService:
         # }
         self.context = context["attributes"]
         self._init_job_task()
-        if self.run_name is None:
-            if self.job is not None and self.task is not None:
-                self.run_name = os.path.join("task", self.job.settings.name, self.task.task_key)
-            else:
-                self.run_name = os.path.join("notebook", self.context["notebook_path"].strip('/'))
-        print(self.run_name)
-        self.logs = LogService(self.session_id, run_id, self.run_name, self.config["Log"]["Path"])
         # jobGroupId = self.databricks_dbutils.notebook.entry_point.getJobGroupId()
         # print(jobGroupId)
         # match = re.search('run-(.*?)-action', jobGroupId)
@@ -240,12 +260,12 @@ class LogService:
                 return json.load(file)
         return {}
 
-    def __init__(self, session_id, run_id, run_name, log_path):
+    def __init__(self, session_id, pipeline_run_id, pipeline_name, log_path):
         self.session_id = session_id
-        self.run_id = run_id
-        self.run_name = run_name
-        self.log_path = os.path.join(log_path, run_name)
-        self.log_file = os.path.join(self.log_path, f"{self.run_id}.json")
+        self.pipeline_run_id = pipeline_run_id
+        self.pipeline_name = pipeline_name
+        self.log_path = os.path.join(log_path, pipeline_name)
+        self.log_file = os.path.join(self.log_path, f"{self.pipeline_run_id}.json")
         self.logs = self.read_log()
 
 class StreamingMetrics:
@@ -473,8 +493,8 @@ class PipelineCluster(PipelineService):
         else:
             print(f"The job cluster file '{job_cluster_file}' does not exist.")
     
-    def __init__(self, run_id, run_name, spark):
-        super().__init__(run_id, run_name, spark)
+    def __init__(self, spark):
+        super().__init__(spark)
         self._init_cluster()
         self.jobs = {}
         for job in self.workspace.jobs.list():
@@ -486,7 +506,14 @@ class Pipeline(PipelineCluster):
     def repair_run(self, job_name:str, params = None):
         last_job_run_result = self.logs.get_last_log("job_run_results", ["state", "result_state"])
         last_job_run_id = self.logs.get_last_log("job_run_results", ["run_id"])
-        latest_repair_id = self.logs.get_last_log("job_runs", ["repair_id"])
+        #latest_repair_id = self.logs.get_last_log("job_runs", ["repair_id"])
+        latest_repair_id = None
+        last_run = self.api.get_job_run(last_job_run_id)
+        if "repair_history" in last_run:
+            repqirs = [repqir for repqir in last_run["repair_history"] if repqir["type"] == "REPAIR"]
+            if repqirs:
+                latest_repair_id = repqirs[-1]["id"]
+
         if last_job_run_id and last_job_run_result in ("FAILED", "TIMEDOUT", "CANCELED"):
             self.logs.log("operations", { "Content": f're-run job:{job_name}' })
             #self.workspace.jobs.get_run(last_job_run_id).overriding_parameters.notebook_params
@@ -586,7 +613,7 @@ class Pipeline(PipelineCluster):
         job = self.workspace.jobs.get(self._get_job_id(job_name))
         for task in job.settings.tasks:
             run_name = os.path.join("task", job.settings.name, task.task_key)
-            logs = LogService(self.session_id, self.run_id, run_name, self.config["Log"]["Path"])
+            logs = LogService(self.session_id, self.pipeline_run_id, run_name, self.config["Log"]["Path"])
             if logs.get_last_log("StreamingProgress", ["continue_status"]):
                 return True
         return False
@@ -915,8 +942,20 @@ class Pipeline(PipelineCluster):
             self.spark_session.streams.addListener(Pipeline.streaming_listener)
             print(f"add {Pipeline.streaming_listener}")
 
-    def __init__(self, run_id, default_catalog = None, run_name = None, spark = None):
-        super().__init__(run_id, run_name, spark)
+    def __init__(self, pipeline_run_id, default_catalog = None, pipeline_name = None, spark = None):
+        super().__init__(spark)
+
+        self.pipeline_run_id = pipeline_run_id
+        self.pipeline_name = pipeline_name
+
+        if self.pipeline_name is None:
+            if self.job is not None and self.task is not None:
+                self.pipeline_name = os.path.join("task", self.job.settings.name, self.task.task_key)
+            else:
+                self.pipeline_name = os.path.join("notebook", self.context["notebook_path"].strip('/'))
+        print(self.pipeline_name)
+        self.logs = LogService(self.session_id, pipeline_run_id, self.pipeline_name, self.config["Log"]["Path"])
+
         print(self.context)
         print(f"Current job: {self.job.settings.name}") if self.job else print("Current job: None")
         print(f"Current task: {self.task.task_key}") if self.task else print("Current task: None")
