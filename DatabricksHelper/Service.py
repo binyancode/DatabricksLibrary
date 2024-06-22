@@ -8,6 +8,7 @@ from typing import Callable
 from pyspark.sql.streaming import StreamingQueryListener, StreamingQuery
 from pyspark.sql.streaming.listener import QueryProgressEvent, StreamingQueryProgress
 from datetime import datetime
+from dateutil.relativedelta import relativedelta
 from urllib.parse import unquote
 from enum import IntFlag
 from types import SimpleNamespace
@@ -161,6 +162,28 @@ class PipelineService:
                 self.job = None
                 self.task = None
 
+    def parse_task_param(self, param):
+        if param is None:
+            return param
+        if isinstance(param, (int, float, bool)):
+            return param
+        if self.task:
+            try:
+                if isinstance(param, str):
+                    param_dict = json.loads(param)
+                else:
+                    param_dict = param
+                task_key = self.task.task_key
+                if task_key in param_dict:
+                    param = param_dict[task_key]
+                    print(f"Parameter:{param}")
+                    return param
+                else:
+                    return param_dict
+            except json.JSONDecodeError:
+                pass  
+        return param
+    
     spark_session:SparkSession
     cluster:ClusterInfo
     host:str
@@ -642,24 +665,35 @@ class Pipeline(PipelineCluster):
         return False
 
     def __parse_source_file(self, source):
-        if self.task:
-            try:
-                source_json = json.loads(source)
-                task_key = self.task.task_key
-                if task_key in source_json:
-                    source_json = source_json[task_key]
-                    print(f"Source:{source_json}")
-                    if "is_dynamic" in source_json and source_json["is_dynamic"]:
-                        return eval(source_json["value"])
-                    else:
-                        return source_json["value"]
-            except json.JSONDecodeError:
-                pass   
-        return source     
+        source = self.parse_task_param(source)
+        if isinstance(source, str):
+            return source
+        elif isinstance(source, dict) and "is_dynamic" in source and source["is_dynamic"]:
+            if "value" in source:
+                return eval(source["value"])
+        elif isinstance(source, dict):
+            if "value" in source:
+                return source["value"]    
+        else:
+            return source
+    
 
     def load_table(self, target_table, source_file, file_format, table_alias = None, reader_options = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1):
         source_file = self.__parse_source_file(source_file)
-        print(f"Source file:{source_file}")
+        target_table = self.parse_task_param(target_table)
+        file_format = self.parse_task_param(file_format)
+        table_alias = self.parse_task_param(table_alias)
+        reader_options = self.parse_task_param(reader_options)
+        max_load_rows = self.parse_task_param(max_load_rows)
+        reload_table = self.parse_task_param(reload_table)
+
+        print(f"target_table:{target_table}")
+        print(f"source_file:{source_file}")
+        print(f"file_format:{file_format}")
+        print(f"table_alias:{table_alias}")
+        print(f"reader_options:{reader_options}")
+        print(f"transform:{transform}")
+        print(f"reload_table:{reload_table}")
 
         self.__add_streaming_listener(max_load_rows)
         #target_table = self.spark_session.sql(f'DESC DETAIL {target_table}').first()["name"]
@@ -712,7 +746,7 @@ class Pipeline(PipelineCluster):
         if write_transform is not None and callable(write_transform) and len(inspect.signature(write_transform).parameters) == 1:
             df = write_transform(df)
         df = df.partitionBy("_load_id", "_load_time")
-        query = df.option("checkpointLocation", checkpoint_dir)\
+        df.option("checkpointLocation", checkpoint_dir)\
         .trigger(availableNow=True)\
         .toTable(target_table)
         #query.stop()
@@ -1013,7 +1047,7 @@ class Pipeline(PipelineCluster):
         self.default_catalog = None
         self.streaming_metrics = StreamingMetrics()
         if default_catalog:
-            self.default_catalog = default_catalog
+            self.default_catalog = self.parse_task_param(default_catalog)
             self.set_default_catalog(self.default_catalog)
 
 

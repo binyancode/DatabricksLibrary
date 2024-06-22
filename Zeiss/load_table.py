@@ -6,37 +6,18 @@ import json
 
 # COMMAND ----------
 
-dbutils.widgets.text("pipeline_run_id", "")
-dbutils.widgets.text("default_catalog", "evacatalog")
-dbutils.widgets.text("table", "temp.test")
-dbutils.widgets.text("source", "/Volumes/evacatalog/temp/dataonboarding/raw/businesspartner/")
-dbutils.widgets.text("dynamic_source", "")
-dbutils.widgets.text("source_format", "json")
-dbutils.widgets.text("table_alias", "{catalog}_{db}_{table}")
-dbutils.widgets.text("reader_options", "") #{\"cloudFiles.schemaHints\":\"date DATE\"}
-dbutils.widgets.text("reload_table", "Reload.DEFAULT")
-dbutils.widgets.text("max_load_rows", "-1")
+parameter_list = ["pipeline_run_id", "default_catalog", "target_table", "source_file", "file_format", "table_alias", "reader_options", "reload_table", "max_load_rows", "task_parameters"]
+for parameter in parameter_list:
+    eval(f'dbutils.widgets.text("{parameter}", "")')
+    exec(f'{parameter} = dbutils.widgets.get("{parameter}")')
+    print(f'{parameter}: ', eval(f'{parameter}'))
 
-pipeline_run_id = dbutils.widgets.get("pipeline_run_id")
-default_catalog = dbutils.widgets.get("default_catalog")
-table = dbutils.widgets.get("table")
-source = dbutils.widgets.get("source")
-dynamic_source = dbutils.widgets.get("dynamic_source")
-source_format = dbutils.widgets.get("source_format")
-table_alias = dbutils.widgets.get("table_alias")
-reader_options = dbutils.widgets.get("reader_options")
-reload_table = dbutils.widgets.get("reload_table")
-max_load_rows = dbutils.widgets.get("max_load_rows")
+
 if reader_options:
     reader_options = json.loads(reader_options)
 if max_load_rows:
     max_load_rows = int(max_load_rows)
-if dynamic_source:
-    source = eval(dynamic_source)
-print(source)
-print(default_catalog)
-print(reader_options)
-print(reload_table)
+
 #{"cloudFiles.schemaHints":"Data STRING", "cloudFiles.maxFileAge":"1 year", "cloudFiles.partitionColumns":""}
 #Reload.DEFAULT|Reload.CLEAR_CHECKPOINT|Reload.CLEAR_SCHEMA|Reload.DROP_TABLE|Reload.TRUNCATE_TABLE
 # Reload.DEFAULT = !Reload.CLEAR_CHECKPOINT ,!
@@ -45,16 +26,24 @@ print(reload_table)
 # COMMAND ----------
 
 p = Pipeline(pipeline_run_id, default_catalog)
-load_id = p.load_table(table, \
-                    source, \
-                    source_format, \
+load_id = p.load_table(target_table = target_table, \
+                    source_file = source_file, \
+                    file_format = file_format, \
                     table_alias = "{catalog}_{db}_{table}" if not table_alias else table_alias, \
-                    reader_options= None if not reader_options else reader_options, \
-                    transform= [lambda df:df, lambda df:df], \
-                    reload_table=eval("Reload.DEFAULT" if not reload_table else reload_table), \
+                    reader_options = None if not reader_options else reader_options, \
+                    transform = [lambda df:df, lambda df:df], \
+                    reload_table = eval("Reload.DEFAULT" if not reload_table else reload_table), \
                     max_load_rows = max_load_rows)
 
 # COMMAND ----------
 
+# task_parameters = p.parse_task_param(task_parameters)
+# print(task_parameters)
+
+# COMMAND ----------
+
 #Delete data older than 30 days
-p.clear_table([table], (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d"))
+try:
+    p.clear_table([target_table], (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d"))
+except Exception as e:
+    print(e)

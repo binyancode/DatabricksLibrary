@@ -10,6 +10,7 @@ pip3 install databricks-sdk
 pip install pyspark
 pip install ipython
 pip install DBUtils
+pip install python-dateutil
 
 
 dbutils.library.restartPython()

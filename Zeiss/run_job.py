@@ -4,27 +4,26 @@ import uuid
 
 # COMMAND ----------
 
-dbutils.widgets.text("pipeline_run_id", str(uuid.uuid4()))
-dbutils.widgets.text("job_name", "bp_job")
-dbutils.widgets.text("default_catalog", "evacatalog")
-dbutils.widgets.text("continue_run", "True")
-pipeline_run_id = dbutils.widgets.get("pipeline_run_id")
-job_name = dbutils.widgets.get("job_name")
-default_catalog = dbutils.widgets.get("default_catalog")
-continue_run = dbutils.widgets.get("continue_run")
+parameter_list = ["pipeline_run_id", "job_name", "default_catalog", "target_table", "source_file", "file_format", "table_alias", "reader_options", "reload_table", "max_load_rows", "continue_run", "task_parameters"]
+for parameter in parameter_list:
+    eval(f'dbutils.widgets.text("{parameter}", "")')
+    exec(f'{parameter} = dbutils.widgets.get("{parameter}")')
+    print(f'{parameter}: ', eval(f'{parameter}'))
+
 if continue_run:
     continue_run = bool(continue_run)
-print(f"pipeline_run_id:{pipeline_run_id}")
-print(default_catalog, job_name)
+else:
+    continue_run = True
+
+params = {}
+for param in parameter_list:
+    value = eval(param)
+    if value is not None and value != "":
+        params[param] = value
+print(params)
 
 # COMMAND ----------
 
 p = Pipeline(pipeline_run_id, default_catalog)
-
-run = p.run(job_name, \
-            { \
-                "pipeline_run_id":pipeline_run_id, \
-                "default_catalog":default_catalog \
-            }, \
-            continue_run)
+run = p.run(job_name, params, continue_run)
 

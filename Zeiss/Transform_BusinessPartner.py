@@ -11,8 +11,13 @@ import json
 
 dbutils.widgets.text("pipeline_run_id","")
 dbutils.widgets.text("default_catalog","evacatalog")
+dbutils.widgets.text("parameters","")
+#global parameters
 pipeline_run_id = dbutils.widgets.get("pipeline_run_id")
 default_catalog = dbutils.widgets.get("default_catalog")
+#task parameters
+parameters = dbutils.widgets.get("parameters")
+print(parameters)
 
 # COMMAND ----------
 
@@ -164,6 +169,12 @@ def process_data(json_str):
 
 p = Pipeline(pipeline_run_id, default_catalog)
 p_u = PipelineUtils()
+
+parameters = p.parse_task_param(parameters)
+print(parameters)
+
+# COMMAND ----------
+
 load = p.get_load_info( \
         schema={"businesspartner":{"Data":bp_schema}}, \
         debug = {"businesspartner":"evacatalog.temp.businesspartner"}, \
