@@ -647,11 +647,12 @@ class Pipeline(PipelineCluster):
                 source_json = json.loads(source)
                 task_key = self.task.task_key
                 if task_key in source_json:
-                    print(f"Source:{source_json[task_key]}")
+                    source_json = source_json[task_key]
+                    print(f"Source:{source_json}")
                     if "is_dynamic" in source_json and source_json["is_dynamic"]:
-                        return eval(source_json[task_key]["value"])
+                        return eval(source_json["value"])
                     else:
-                        return source_json[task_key]["value"]
+                        return source_json["value"]
             except json.JSONDecodeError:
                 pass   
         return source     
