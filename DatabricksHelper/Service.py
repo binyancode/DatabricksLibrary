@@ -417,15 +417,16 @@ class PipelineCluster(PipelineService):
             # ['task2.1', 'task6', 'task7', 'task4', 'task4.1']
             # ['task2.1', 'task6', 'task7', 'task4', 'task4.1']
             #
-
+            #遍历列表，列表初始化是所有的root节点
             for temp_task in [temp_task for temp_task in list(set(temp_tasks))]:
                 for root_task in root_tasks:
                     depends_on = root_task.get('depends_on')
+                    #查找当前节点的父亲是否在列表里
                     if depends_on and temp_task in [depends_on_key["task_key"] for depends_on_key in depends_on]:
-
+                        #如果是则用当前的的节点替换列表里的父亲节点
                         #if not root_task["task_key"] in temp_tasks:
                         temp_tasks.append(root_task["task_key"])
-                            
+                        #删除父亲节点，这样父亲只会被子节点替换一次
                         if temp_task in temp_tasks:
                             temp_tasks.remove(temp_task)
             print(temp_tasks)
