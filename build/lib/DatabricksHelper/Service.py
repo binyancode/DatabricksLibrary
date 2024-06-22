@@ -641,7 +641,25 @@ class Pipeline(PipelineCluster):
                 return True
         return False
 
+    def __parse_source_file(self, source):
+        if self.task:
+            try:
+                source_json = json.loads(source)
+                task_key = self.task.task_key
+                if task_key in source_json:
+                    print(f"Source:{source_json[task_key]}")
+                    if "is_dynamic" in source_json and source_json["is_dynamic"]:
+                        return eval(source_json[task_key]["value"])
+                    else:
+                        return source_json[task_key]["value"]
+            except json.JSONDecodeError:
+                pass   
+        return source     
+
     def load_table(self, target_table, source_file, file_format, table_alias = None, reader_options = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1):
+        source_file = self.__parse_source_file(source_file)
+        print(f"Source file:{source_file}")
+
         self.__add_streaming_listener(max_load_rows)
         #target_table = self.spark_session.sql(f'DESC DETAIL {target_table}').first()["name"]
         catalog = self.__get_catalog(target_table) if not self.default_catalog else self.default_catalog
@@ -965,6 +983,8 @@ class Pipeline(PipelineCluster):
             Pipeline.streaming_listener = StreamingListener(self.logs, self.streaming_metrics, self.__streaming_progress, max_load_rows)
             self.spark_session.streams.addListener(Pipeline.streaming_listener)
             print(f"add {Pipeline.streaming_listener}")
+        else:
+            Pipeline.streaming_listener.max_load_rows = max_load_rows
 
     pipeline_run_id:str
     pipeline_name:str
