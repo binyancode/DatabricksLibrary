@@ -659,34 +659,35 @@ class Pipeline(PipelineCluster):
     def __check_continue(self, job_name):
         job = self.workspace.jobs.get(self._get_job_id(job_name))
         for task in job.settings.tasks:
-            run_name = os.path.join("task", job.settings.name, task.task_key)
-            logs = LogService(self.session_id, self.pipeline_run_id, run_name, self.config["Log"]["Path"])
+            logs = self.__init_logs(job, task)
             if logs.get_last_log("StreamingProgress", ["continue_status"]):
                 return True
         return False
 
-    def __parse_source_file(self, source):
+    def __parse_task_param(self, source):
         source = self.parse_task_param(source)
-        if isinstance(source, str):
+        if isinstance(source, (int, float, bool, str)):
             return source
         elif isinstance(source, dict) and "is_dynamic" in source and source["is_dynamic"]:
             if "value" in source:
                 return eval(source["value"])
         elif isinstance(source, dict):
             if "value" in source:
-                return source["value"]    
+                return source["value"]
+            else:
+                return source    
         else:
             return source
     
 
     def load_table(self, target_table, source_file, file_format, table_alias = None, reader_options = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1):
-        source_file = self.__parse_source_file(source_file)
-        target_table = self.parse_task_param(target_table)
-        file_format = self.parse_task_param(file_format)
-        table_alias = self.parse_task_param(table_alias)
-        reader_options = self.parse_task_param(reader_options)
-        max_load_rows = self.parse_task_param(max_load_rows)
-        reload_table = self.parse_task_param(reload_table)
+        source_file = self.__parse_task_param(source_file)
+        target_table = self.__parse_task_param(target_table)
+        file_format = self.__parse_task_param(file_format)
+        table_alias = self.__parse_task_param(table_alias)
+        reader_options = self.__parse_task_param(reader_options)
+        max_load_rows = self.__parse_task_param(max_load_rows)
+        reload_table = self.__parse_task_param(reload_table)
 
         print(f"target_table:{target_table}")
         print(f"source_file:{source_file}")
@@ -1028,19 +1029,28 @@ class Pipeline(PipelineCluster):
     logs:LogService
     streaming_metrics:StreamingMetrics
 
+    def __init_logs(self, job, task):
+        pipeline_name = self.pipeline_name
+        if pipeline_name:
+            pipeline_name = pipeline_name.strip('/')
+        if pipeline_name:
+            pipeline_name = os.path.join("pipeline", pipeline_name)
+        if job is not None and task is not None:
+            pipeline_name = os.path.join(pipeline_name if pipeline_name else "task")
+            pipeline_name = os.path.join(pipeline_name, job.settings.name, task.task_key.strip('/'))
+        else:
+            pipeline_name = os.path.join(pipeline_name if pipeline_name else "notebook")
+            pipeline_name = os.path.join(pipeline_name, self.context["notebook_path"].strip('/'))
+        print(pipeline_name)
+        return LogService(self.session_id, self.pipeline_run_id, pipeline_name, self.config["Log"]["Path"])
+
     def __init__(self, pipeline_run_id, default_catalog = None, pipeline_name = None, spark = None):
         super().__init__(spark)
 
         self.pipeline_run_id = pipeline_run_id
-
-        if pipeline_name is None:
-            if self.job is not None and self.task is not None:
-                pipeline_name = os.path.join("task", self.job.settings.name, self.task.task_key)
-            else:
-                pipeline_name = os.path.join("notebook", self.context["notebook_path"].strip('/'))
         self.pipeline_name = pipeline_name
-        print(self.pipeline_name)
-        self.logs = LogService(self.session_id, pipeline_run_id, self.pipeline_name, self.config["Log"]["Path"])
+
+        self.logs = self.__init_logs(self.job, self.task)
 
         print(self.context)
         print(f"Current job: {self.job.settings.name}") if self.job else print("Current job: None")
