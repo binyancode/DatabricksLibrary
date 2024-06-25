@@ -1,6 +1,8 @@
 from DatabricksHelper.Service import PipelineService
-from pyspark.sql import DataFrame, SparkSession 
+from pyspark.sql import DataFrame, SparkSession
+from types import SimpleNamespace
 import hashlib
+import json
 
 class PipelineUtils:
     def __string_to_md5(self, input_string):
@@ -56,7 +58,39 @@ class PipelineUtils:
         if view_name:
             cache_dataframe.createOrReplaceTempView(view_name)
         return cache_dataframe
+
+    def __init_params(self, parameter_list):
+        params = {}
+        for parameter in parameter_list:
+            name = parameter[0] if isinstance(parameter, tuple) else parameter
+            default_value = parameter[1] if isinstance(parameter, tuple) else ""
+            eval(f'self.pipeline_service.databricks_dbutils.widgets.text("{name}", "{default_value}")')
+            exec(f'params["{name}"] = self.pipeline_service.databricks_dbutils.widgets.get("{name}")')
+            if isinstance(parameter, tuple) and len(parameter) > 2:
+                exec(f'params["{name}"] = {parameter[2]}(params["{name}"]) if params["{name}"] and isinstance(params["{name}"], str) else ""')
+        return params
     
+    
+    def init_run_params(self):
+        parameter_list = ["pipeline_run_id", "pipeline_name", "job_name", "default_catalog", "target_table", \
+                          "source_file", "file_format", "table_alias", "reader_options", "reload_table", \
+                            "max_load_rows", ("continue_run", "True", "bool"), "task_parameters"]
+        params = self.__init_params(parameter_list)
+        params["job_params"] = {}
+        for key, value in params.items():
+            if key != "job_params" and value is not None and value != "":
+                params["job_params"][key] = value
+        params = SimpleNamespace(**params)
+        return params
+
+    def init_load_params(self):
+        parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "target_table", \
+                          "source_file", "file_format", "table_alias", ("reader_options","{}","json.loads"), \
+                            ("reload_table", "Reload.DEFAULT"), ("max_load_rows", "-1", "int"), "task_parameters"]
+        params = self.__init_params(parameter_list)
+        params = SimpleNamespace(**params)
+        return params
+
     def parse_task_params(self, task_params):
         return self.pipeline_service.parse_task_params(task_params)
 
