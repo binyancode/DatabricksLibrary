@@ -296,16 +296,14 @@ class LogService:
 
     session_id:str
     pipeline_run_id:str
-    pipeline_name:str
     log_path:str
     log_file:str
     logs:dict
 
-    def __init__(self, session_id, pipeline_run_id, pipeline_name, log_path):
+    def __init__(self, session_id, pipeline_run_id, log_path):
         self.session_id = session_id
         self.pipeline_run_id = pipeline_run_id
-        self.pipeline_name = pipeline_name
-        self.log_path = os.path.join(log_path, pipeline_name)
+        self.log_path = log_path
         self.log_file = os.path.join(self.log_path, f"{self.pipeline_run_id}.json")
         self.logs = self.read_log()
 
@@ -551,26 +549,15 @@ class Pipeline(PipelineCluster):
     streaming_listener = None
 
     def repair_run(self, job_name:str, params = None):
-        last_job_run_result = self.logs.get_last_log("job_run_results", ["state", "result_state"])
-        last_job_run_id = self.logs.get_last_log("job_run_results", ["run_id"])
-        #latest_repair_id = self.logs.get_last_log("job_runs", ["repair_id"])
-        latest_repair_id = None
-        last_run = self.api.get_job_run(last_job_run_id)
-        if "repair_history" in last_run:
-            repqirs = [repqir for repqir in last_run["repair_history"] if repqir["type"] == "REPAIR"]
-            if repqirs:
-                latest_repair_id = repqirs[-1]["id"]
-
-        if last_job_run_id and last_job_run_result in ("FAILED", "TIMEDOUT", "CANCELED"):
-            self.logs.log("operations", { "Content": f're-run job:{job_name}' })
-            #self.workspace.jobs.get_run(last_job_run_id).overriding_parameters.notebook_params
+        if self.last_run.run_id and self.last_run.job_run_result in ("FAILED", "TIMEDOUT", "CANCELED"):
+            self.logs.log("operations", { "operation": f're-run job:{job_name}' })
             
-            wait_run = self.workspace.jobs.repair_run(last_job_run_id, latest_repair_id=latest_repair_id, notebook_params=params, rerun_all_failed_tasks=True)
-            print(f"Re-running the job {job_name} with status {last_job_run_result}.")
+            wait_run = self.workspace.jobs.repair_run(self.last_run.run_id, latest_repair_id=self.last_run.latest_repair_id, notebook_params=params, rerun_all_failed_tasks=True)
+            print(f"Re-running the job {job_name} with status {self.last_run.job_run_result}.")
 
             return self.__running(wait_run)
         else:
-            print(f"Skip re-running the job {job_name} with status {last_job_run_result}.")
+            print(f"Skip re-running the job {job_name} with status {self.last_run.job_run_result}.")
             return None
 
     def __running(self, wait_run):
@@ -588,6 +575,7 @@ class Pipeline(PipelineCluster):
         return result_dict
 
     def run(self, job_name:str, params = None, continue_run = True):
+        self.__get_last_run()
         continue_status = True
         index = 0
         while continue_status:
@@ -606,7 +594,7 @@ class Pipeline(PipelineCluster):
 
         self._assign_job_cluster(job_name)
 
-        if self.logs.get_last_log("job_run_results", ["run_id"]):
+        if self.last_run.job_run_id:
             run = self.repair_run(job_name, params)
             if run:
                 return (run, False)
@@ -617,14 +605,18 @@ class Pipeline(PipelineCluster):
             if params is None:
                 params = {}
             params["default_catalog"] = self.default_catalog
-        self.logs.log("operations", { "Content": f'run job:{job_name}' })
+        self.logs.log("operations", { "operation": f'run job:{job_name}' })
         wait_run = self.workspace.jobs.run_now(job_id, notebook_params=params)
         print(f"Running the job {job_name}.")
         return (self.__running(wait_run), self.__check_continue(job_name))
 
     def __read_data(self, source_file, file_format, schema_dir, reader_options = None):
+        if not self.last_load.load_info or self.last_load.load_info["status"] == "succeeded":
+            load_id = str(uuid.uuid4())
+        else:
+            load_id = self.last_load.load_info["load_id"]
+        self.logs.log("load_info", { "load_id": load_id, "status": "loading", "source_file": source_file, "file_format": file_format, "schema_dir": schema_dir }, True)
 
-        load_id = str(uuid.uuid4())
         df = self.spark_session.readStream \
         .format("cloudFiles") \
         .option("cloudFiles.format", file_format)\
@@ -660,7 +652,7 @@ class Pipeline(PipelineCluster):
         job = self.workspace.jobs.get(self._get_job_id(job_name))
         for task in job.settings.tasks:
             logs = self.__init_logs(job, task)
-            if logs.get_last_log("StreamingProgress", ["continue_status"]):
+            if logs.get_last_log("streaming", ["continue_status"]):
                 return True
         return False
 
@@ -697,6 +689,8 @@ class Pipeline(PipelineCluster):
         print(f"transform:{transform}")
         print(f"reload_table:{reload_table}")
 
+        self.__get_last_load()
+
         self.__add_streaming_listener(max_load_rows)
         #target_table = self.spark_session.sql(f'DESC DETAIL {target_table}').first()["name"]
         catalog = self.__get_catalog(target_table) if not self.default_catalog else self.default_catalog
@@ -708,19 +702,19 @@ class Pipeline(PipelineCluster):
         schema_dir = os.path.join(self.config["Data"]["Schema"]["Path"], table_info_dir)
         if Reload.CLEAR_SCHEMA in reload_table:
             self._delete_all_files_and_folders(schema_dir)
-            self.logs.log('operations', { "Content": f'clear schema:{schema_dir}' })
+            self.logs.log('operations', { "operation": f'clear schema:{schema_dir}' })
             print(f'clear schema:{schema_dir}')
         if Reload.CLEAR_CHECKPOINT in reload_table:
             self._delete_all_files_and_folders(checkpoint_dir)
-            self.logs.log('operations', { "Content": f'clear checkpoint:{checkpoint_dir}' })
+            self.logs.log('operations', { "operation": f'clear checkpoint:{checkpoint_dir}' })
             print(f'clear checkpoint:{checkpoint_dir}')
         if Reload.DROP_TABLE in reload_table or Reload.TRUNCATE_TABLE in reload_table:
             print(f'clear table:{target_table}')
             if not self.__truncate_table(target_table, Reload.TRUNCATE_TABLE in reload_table):
-                    self.logs.log('operations', { "Content": f'clear table:{target_table} not exists' })
+                    self.logs.log('operations', { "operation": f'clear table:{target_table} not exists' })
                     print(f'clear table:{target_table} not exists')
             else:
-                    self.logs.log('operations', { "Content": f'clear table:{target_table}' })
+                    self.logs.log('operations', { "operation": f'clear table:{target_table}' })
                     print(f'clear table:{target_table}')
         #spark.streams.addListener(Listener())
 
@@ -753,10 +747,11 @@ class Pipeline(PipelineCluster):
         .toTable(target_table)
         #query.stop()
         self.__set_task_value("task_load_info", {"table":target_table, "view": table_alias, "load_id":load_id})
-        self.logs.log('operations', { "Content": f'load table:{target_table}' })
+        self.logs.log('operations', { "operation": f'load table:{target_table}' })
         self.logs.flush_log()
         self.__wait_loading_data()
         self.logs.flush_log()
+        self.logs.log("load_info", { "load_id": load_id, "status": "succeeded", "source_file": source_file, "file_format": file_format, "schema_dir": schema_dir }, True)
         return load_id
 
     def load_view(self, target_view, target_path, source_file, file_format, view_alias = None, reader_options = None, transform = None, reload_view = False, max_load_rows = -1):
@@ -766,11 +761,11 @@ class Pipeline(PipelineCluster):
         schema_dir = os.path.join(self.config["Data"]["Schema"]["Path"], "" if self.default_catalog is None else self.default_catalog, checkpoint_name)
         if reload_view:
             self._delete_all_files_and_folders(schema_dir)
-            self.logs.log('operations', { "Content": f'clear checkpoint:{schema_dir}' })
+            self.logs.log('operations', { "operation": f'clear checkpoint:{schema_dir}' })
             self._delete_all_files_and_folders(checkpoint_dir)
-            self.logs.log('operations', { "Content": f'clear checkpoint:{checkpoint_dir}' })
+            self.logs.log('operations', { "operation": f'clear checkpoint:{checkpoint_dir}' })
             self._delete_all_files_and_folders(target_path)
-            self.logs.log('operations', { "Content": f'clear path:{target_path}' })
+            self.logs.log('operations', { "operation": f'clear path:{target_path}' })
         #spark.streams.addListener(Listener())
 
         reader = self._read_data(checkpoint_name, source_file, file_format, reader_options)
@@ -804,7 +799,7 @@ class Pipeline(PipelineCluster):
 
         #self.spark_session.conf.set(f"pipeline.{target_view.replace(' ', '_')}.load_id", load_id)
         self.__set_task_value("task_load_info", {"table":target_view, "view": view_alias, "load_id":load_id})
-        self.logs.log('operations', { "Content": f'load path:{target_path}' })
+        self.logs.log('operations', { "operation": f'load path:{target_path}' })
         self.flush_log()
         self.__wait_loading_data()
         self.view(target_view, target_path, 'delta')
@@ -971,7 +966,7 @@ class Pipeline(PipelineCluster):
         pass
 
     def clear_table(self, table_names, earlist_time):
-        self.logs.log('operations', { "Content": f'clear table:{table_names} older than {earlist_time}' }, True)
+        self.logs.log('operations', { "operation": f'clear table:{table_names} older than {earlist_time}' }, True)
         for table_name in table_names:
             df = self.spark_session.sql(f"SHOW PARTITIONS {table_name}")
             df.createOrReplaceTempView("partitions")
@@ -1009,11 +1004,11 @@ class Pipeline(PipelineCluster):
                 print(f"Current streaming : {progress.id} {progress.runId} ")
                 print(f"Stop streaming with row count: {metrics.row_count}")
                 print(f"Stop streaming : {stream.id} {stream.runId}")
-                self.logs.log("StreamingProgress", {"metrics":metrics.as_dict(), "max_load_rows":max_load_rows, "continue_status":True}, True)
+                self.logs.log("streaming", {"metrics":metrics.as_dict(), "max_load_rows":max_load_rows, "continue_status":True}, True)
                 metrics.reset()
                 stream.stop()
         else:
-            self.logs.log("StreamingProgress", {"metrics":metrics.as_dict(), "max_load_rows":max_load_rows, "continue_status":False}, True)
+            self.logs.log("streaming", {"metrics":metrics.as_dict(), "max_load_rows":max_load_rows, "continue_status":False}, True)
 
     def __add_streaming_listener(self, max_load_rows = -1):
         if Pipeline.streaming_listener is None:
@@ -1030,19 +1025,40 @@ class Pipeline(PipelineCluster):
     streaming_metrics:StreamingMetrics
 
     def __init_logs(self, job, task):
-        pipeline_name = self.pipeline_name
-        if pipeline_name:
-            pipeline_name = pipeline_name.strip('/')
-        if pipeline_name:
-            pipeline_name = os.path.join("pipeline", pipeline_name)
+        log_folder = self.pipeline_name
+        if log_folder:
+            log_folder = log_folder.strip('/')
+        if log_folder:
+            log_folder = os.path.join("pipeline", log_folder)
         if job is not None and task is not None:
-            pipeline_name = os.path.join(pipeline_name if pipeline_name else "task")
-            pipeline_name = os.path.join(pipeline_name, job.settings.name, task.task_key.strip('/'))
+            log_folder = os.path.join(log_folder if log_folder else "task")
+            log_folder = os.path.join(log_folder, job.settings.name, task.task_key.strip('/'))
         else:
-            pipeline_name = os.path.join(pipeline_name if pipeline_name else "notebook")
-            pipeline_name = os.path.join(pipeline_name, self.context["notebook_path"].strip('/'))
-        print(pipeline_name)
-        return LogService(self.session_id, self.pipeline_run_id, pipeline_name, self.config["Log"]["Path"])
+            log_folder = os.path.join(log_folder if log_folder else "notebook")
+            log_folder = os.path.join(log_folder, self.context["notebook_path"].strip('/'))
+        log_path = os.path.join(self.config["Log"]["Path"], log_folder)
+        print(log_folder)
+        return LogService(self.session_id, self.pipeline_run_id, log_path)
+
+    def __get_last_run(self):
+        self.last_run = {}
+        self.last_run["job_run_result"] = self.logs.get_last_log("job_run_results", ["state", "result_state"])
+        self.last_run["job_run_id"] = self.logs.get_last_log("job_run_results", ["run_id"])
+        
+        self.last_run["latest_repair_id"] = None
+        last_run = self.api.get_job_run(self.last_run["job_run_id"])
+        if "repair_history" in last_run:
+            repqirs = [repqir for repqir in last_run["repair_history"] if repqir["type"] == "REPAIR"]
+            if repqirs:
+                self.last_run["latest_repair_id"] = repqirs[-1]["id"]
+        self.last_run = SimpleNamespace(**self.last_run)
+        print(self.last_run)
+
+    def __get_last_load(self):
+        self.last_load = {}
+        self.last_load["load_info"] = self.logs.get_last_log("load_info", [])
+        self.last_load = SimpleNamespace(**self.last_load)
+        print(self.last_load)
 
     def __init__(self, pipeline_run_id, default_catalog = None, pipeline_name = None, spark = None):
         super().__init__(spark)
