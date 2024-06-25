@@ -91,6 +91,13 @@ class PipelineUtils:
         params = SimpleNamespace(**params)
         return params
 
+    def init_transform_params(self):
+        parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "task_parameters"]
+        params = self.__init_params(parameter_list)
+        params["task_parameters"] = self.parse_task_param(params["task_parameters"])
+        params = SimpleNamespace(**params)
+        return params
+
     def parse_task_params(self, task_params):
         return self.pipeline_service.parse_task_params(task_params)
 

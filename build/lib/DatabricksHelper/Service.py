@@ -574,29 +574,6 @@ class Pipeline(PipelineCluster):
         print(f"{json.dumps(result_dict)}\n")
         return result_dict
 
-    def __init_params(self, parameter_list):
-        params = {}
-        for parameter in parameter_list:
-            name = parameter[0] if isinstance(parameter, tuple) else parameter
-            default_value = parameter[1] if isinstance(parameter, tuple) else ""
-            eval(f'dbutils.widgets.text("{name}", "{default_value}")')
-            exec(f'params["{name}"] = dbutils.widgets.get("{name}")')
-            if isinstance(parameter, tuple) and len(parameter) > 2:
-                exec(f'params["{name}"] = {parameter[2]}(params["{name}"]) if params["{name}"] and isinstance(params["{name}"], str) else ""')
-        return params
-
-    def init_run_params(self):
-        parameter_list = ["pipeline_run_id", "pipeline_name", "job_name", "default_catalog", "target_table", \
-                          "source_file", "file_format", "table_alias", "reader_options", "reload_table", \
-                            "max_load_rows", ("continue_run", "True", "bool"), "task_parameters"]
-        params = self.__init_params(parameter_list)
-        
-        for key, value in params.items():
-            if key != "job_params" and value is not None and value != "":
-                params["job_params"][key] = value
-        params = SimpleNamespace(**params)
-        return params
-
     def run(self, job_name:str, params = None, continue_run = True):
         self.__get_last_run()
         continue_status = True
@@ -694,13 +671,7 @@ class Pipeline(PipelineCluster):
         else:
             return source
     
-    def init_load_params(self):
-        parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "target_table", \
-                          "source_file", "file_format", "table_alias", ("reader_options","{}","json.loads"), \
-                            ("reload_table", "Reload.DEFAULT"), ("max_load_rows", "-1", "int"), "task_parameters"]
-        params = self.__init_params(parameter_list)
-        params = SimpleNamespace(**params)
-        return params
+
 
     def load_table(self, target_table, source_file, file_format, table_alias = None, reader_options = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1):
         source_file = self.__parse_task_param(source_file)
