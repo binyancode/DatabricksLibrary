@@ -549,10 +549,10 @@ class Pipeline(PipelineCluster):
     streaming_listener = None
 
     def repair_run(self, job_name:str, params = None):
-        if self.last_run.run_id and self.last_run.job_run_result in ("FAILED", "TIMEDOUT", "CANCELED"):
+        if self.last_run.job_run_id and self.last_run.job_run_result in ("FAILED", "TIMEDOUT", "CANCELED"):
             self.logs.log("operations", { "operation": f're-run job:{job_name}' })
             
-            wait_run = self.workspace.jobs.repair_run(self.last_run.run_id, latest_repair_id=self.last_run.latest_repair_id, notebook_params=params, rerun_all_failed_tasks=True)
+            wait_run = self.workspace.jobs.repair_run(self.last_run.job_run_id, latest_repair_id=self.last_run.latest_repair_id, notebook_params=params, rerun_all_failed_tasks=True)
             print(f"Re-running the job {job_name} with status {self.last_run.job_run_result}.")
 
             return self.__running(wait_run)
