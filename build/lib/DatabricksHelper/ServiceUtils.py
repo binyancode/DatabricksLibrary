@@ -38,17 +38,17 @@ class PipelineUtils:
         else:
             raise Exception("Invalid data type")
         
-        user = self.pipeline_service.spark_session.sql('select current_user()').collect()[0][0]
+        user = self.pipeline_service.spark_session.sql('select current_user()').collect()[0][0].replace('@', '#').replace('.', '#')
 
         if stage_table:
             if catalog:
                 table_name = f"`{catalog}`.`{schema}`.`{view_name}_{user}`"
             else:
                 table_name = f"`{schema}`.`{view_name}_{user}`"
-
+            print(table_name)
             self.pipeline_service.spark_session.sql(f"drop table if exists {table_name}").collect()
             self.pipeline_service.spark_session.sql(f"create table {table_name} as {query}").collect()
-            cache_dataframe = self.pipeline_service.spark_session.sql(f"select * from {table_name}")
+            cache_dataframe = self.pipeline_service.spark_session.table(f"{table_name}")
             cache_dataframe.cache()
         else:
             cache_dataframe = self.pipeline_service.spark_session.sql(query)
