@@ -460,12 +460,12 @@ class PipelineCluster(PipelineService):
     def __install_libraries(self, task:Task):
         depends_on_libraries = self.config["Job"]["Cluster"]["Libraries"]
         for depends_on_library in depends_on_libraries:
-            for library_source, library_value in depends_on_library.items():
-                if library_source == "whl":
+            for library_type, library_value in depends_on_library.items():
+                if library_type == "whl":
                     for library in [library for library in task.libraries if library.whl and library.whl == library_value]:
                         task.libraries.remove(library)
                     task.libraries.append(Library(whl=library_value))
-                elif library_source == "pypi":
+                elif library_type == "pypi":
                     for library in [library for library in task.libraries if library.pypi and library.pypi.package == library_value["package"]]:
                         task.libraries.remove(library)
                     task.libraries.append(Library(pypi= PythonPyPiLibrary(package=library_value["package"])))
