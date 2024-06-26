@@ -98,8 +98,8 @@ class PipelineUtils:
         params = SimpleNamespace(**params)
         return params
 
-    def parse_task_params(self, task_params):
-        return self.pipeline_service.parse_task_params(task_params)
+    def parse_task_param(self, task_params):
+        return self.pipeline_service.parse_task_param(task_params)
 
     def sql_params(self, params):
         for key, value in params.items():

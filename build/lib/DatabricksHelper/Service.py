@@ -457,6 +457,19 @@ class PipelineCluster(PipelineService):
                 max_dop += self.__max_dop_tasks([task.as_dict() for task in tasks])
         return max_dop
 
+    def __install_libraries(self, task):
+        depends_on_libraries = self.config["Job"]["Cluster"]["Libraries"]
+        for depends_on_library in depends_on_libraries:
+            for library_source, library_value in depends_on_library.items():
+                if library_source == "whl":
+                    for library in [library for library in task.libraries if "whl" in library and library["whl"] == library_value]:
+                        task.libraries.remove(library)
+                    task.libraries.append({"whl": library_value})
+                elif library_source == "pypi":
+                    for library in [library for library in task.libraries if "pypi" in library and library["pypi"]["package"] == library_value["package"]]:
+                        task.libraries.remove(library)
+                    task.libraries.append({"pypi": library_value})
+
     def _assign_job_cluster(self, job_name):
         job = None
         for base_job in [base_job for base_job in self.workspace.jobs.list() if base_job.settings.name == job_name]:
@@ -506,7 +519,6 @@ class PipelineCluster(PipelineService):
                         print(f"Apply job cluster {job_cluster_key} for job: {job_name}")
 
 
-                pipeline_library = self.config["Job"]["Cluster"]["PipelineLibaray"]
                 
                 for task in job.settings.tasks:
                     if "task_job_cluster" in job_cluster_json:
@@ -515,9 +527,8 @@ class PipelineCluster(PipelineService):
                                 task.job_cluster_key = job_cluster_key
                                 if task.libraries is None:
                                     task.libraries = []
-                                for library in [library for library in task.libraries if "whl" in library and library["whl"] == pipeline_library]:
-                                    task.libraries.remove(library)
-                                task.libraries.append({"whl": pipeline_library})
+                                self.__install_libraries(task)
+                                
                                 self.workspace.jobs.reset(job.job_id, job.settings)
                                 print(f"Apply job cluster {job_cluster_key} for task: {task.task_key}")
 
@@ -527,9 +538,8 @@ class PipelineCluster(PipelineService):
                                 task.job_cluster_key = None
                                 if task.libraries is None:
                                     task.libraries = []
-                                for library in [library for library in task.libraries if "whl" in library and library["whl"] == pipeline_library]:
-                                    task.libraries.remove(library)
-                                task.libraries.append({"whl":pipeline_library})
+                                self.__install_libraries(task)
+
                                 if existing_cluster_id == "" or existing_cluster_id is None:
                                     existing_cluster_id = self.cluster.cluster_id
                                 task.existing_cluster_id = existing_cluster_id
@@ -549,10 +559,10 @@ class Pipeline(PipelineCluster):
     streaming_listener = None
 
     def repair_run(self, job_name:str, params = None):
-        if self.last_run.job_run_id and self.last_run.job_run_result in ("FAILED", "TIMEDOUT", "CANCELED"):
+        if self.last_run.run_id and self.last_run.job_run_result in ("FAILED", "TIMEDOUT", "CANCELED"):
             self.logs.log("operations", { "operation": f're-run job:{job_name}' })
             
-            wait_run = self.workspace.jobs.repair_run(self.last_run.job_run_id, latest_repair_id=self.last_run.latest_repair_id, notebook_params=params, rerun_all_failed_tasks=True)
+            wait_run = self.workspace.jobs.repair_run(self.last_run.run_id, latest_repair_id=self.last_run.latest_repair_id, notebook_params=params, rerun_all_failed_tasks=True)
             print(f"Re-running the job {job_name} with status {self.last_run.job_run_result}.")
 
             return self.__running(wait_run)
@@ -671,7 +681,6 @@ class Pipeline(PipelineCluster):
         else:
             return source
     
-
 
     def load_table(self, target_table, source_file, file_format, table_alias = None, reader_options = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1):
         source_file = self.__parse_task_param(source_file)

@@ -1,7 +1,35 @@
 from DatabricksHelper.Service import PipelineService
-from pyspark.sql import DataFrame, SparkSession 
+from pyspark.sql import DataFrame, SparkSession
+from types import SimpleNamespace
+import hashlib
+import json
 
 class PipelineUtils:
+    def __string_to_md5(self, input_string):
+        md5_obj = hashlib.md5()
+        md5_obj.update(input_string.encode('utf-8'))
+        md5_value = md5_obj.hexdigest()
+        return md5_value
+    
+    def change_table_owner(self, table_name, new_owner = None):
+        if not new_owner:
+            new_owner = self.pipeline_service.spark_session.sql('select current_user()').collect()[0][0]
+        sql = f'alter table {table_name} set owner to `{new_owner}`'
+        print(sql)
+        self.pipeline_service.spark_session.sql(sql).collect()
+
+    def check_table_exists(self, catalog, schema, table_name):
+        if catalog and schema:
+            scope = f"`{catalog}`.`{schema}`"
+        elif schema:
+            scope = f"`{schema}`"
+        else:
+            scope = None
+        if scope:
+            return self.pipeline_service.spark_session.sql(f"show tables in {scope} like '{table_name}'").count() > 0
+        else:
+            return self.pipeline_service.spark_session.sql(f"show tables like '{table_name}'").count() > 0
+
     def cache(self, data, view_name:str = None, stage_table = False, catalog = None, schema = "cache"):
         query = None
         if isinstance(data, str):
@@ -11,14 +39,18 @@ class PipelineUtils:
             query = f"select * from {view_name}_dataframe"
         else:
             raise Exception("Invalid data type")
+        
+        user = self.pipeline_service.spark_session.sql('select current_user()').collect()[0][0].replace('@', '#').replace('.', '#')
+
         if stage_table:
             if catalog:
-                table_name = f"{catalog}.{schema}.{view_name}"
+                table_name = f"`{catalog}`.`{schema}`.`{view_name}_{user}`"
             else:
-                table_name = f"{schema}.{view_name}"
+                table_name = f"`{schema}`.`{view_name}_{user}`"
+            print(table_name)
             self.pipeline_service.spark_session.sql(f"drop table if exists {table_name}").collect()
             self.pipeline_service.spark_session.sql(f"create table {table_name} as {query}").collect()
-            cache_dataframe = self.pipeline_service.spark_session.sql(f"select * from {table_name}")
+            cache_dataframe = self.pipeline_service.spark_session.table(f"{table_name}")
             cache_dataframe.cache()
         else:
             cache_dataframe = self.pipeline_service.spark_session.sql(query)
@@ -26,9 +58,48 @@ class PipelineUtils:
         if view_name:
             cache_dataframe.createOrReplaceTempView(view_name)
         return cache_dataframe
+
+    def __init_params(self, parameter_list):
+        params = {}
+        for parameter in parameter_list:
+            name = parameter[0] if isinstance(parameter, tuple) else parameter
+            default_value = parameter[1] if isinstance(parameter, tuple) else ""
+            eval(f'self.pipeline_service.databricks_dbutils.widgets.text("{name}", "{default_value}")')
+            exec(f'params["{name}"] = self.pipeline_service.databricks_dbutils.widgets.get("{name}")')
+            if isinstance(parameter, tuple) and len(parameter) > 2:
+                exec(f'params["{name}"] = {parameter[2]}(params["{name}"]) if params["{name}"] and isinstance(params["{name}"], str) else ""')
+        return params
     
-    def parse_task_params(self, task_params):
-        return self.pipeline_service.parse_task_params(task_params)
+    
+    def init_run_params(self):
+        parameter_list = ["pipeline_run_id", "pipeline_name", "job_name", "default_catalog", "target_table", \
+                          "source_file", "file_format", "table_alias", "reader_options", "reload_table", \
+                            "max_load_rows", ("continue_run", "True", "bool"), "task_parameters"]
+        params = self.__init_params(parameter_list)
+        params["job_params"] = {}
+        for key, value in params.items():
+            if key != "job_params" and value is not None and value != "":
+                params["job_params"][key] = value
+        params = SimpleNamespace(**params)
+        return params
+
+    def init_load_params(self):
+        parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "target_table", \
+                          "source_file", "file_format", "table_alias", ("reader_options","{}","json.loads"), \
+                            ("reload_table", "Reload.DEFAULT"), ("max_load_rows", "-1", "int"), "task_parameters"]
+        params = self.__init_params(parameter_list)
+        params = SimpleNamespace(**params)
+        return params
+
+    def init_transform_params(self):
+        parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "task_parameters"]
+        params = self.__init_params(parameter_list)
+        params["task_parameters"] = self.parse_task_param(params["task_parameters"])
+        params = SimpleNamespace(**params)
+        return params
+
+    def parse_task_param(self, task_params):
+        return self.pipeline_service.parse_task_param(task_params)
 
     def sql_params(self, params):
         for key, value in params.items():
