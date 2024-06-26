@@ -1,22 +1,16 @@
 # Databricks notebook source
 from DatabricksHelper.Service import Pipeline,Reload
+from DatabricksHelper.ServiceUtils import PipelineUtils
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import json
 
 # COMMAND ----------
 
-parameter_list = ["pipeline_run_id", "default_catalog", "target_table", "source_file", "file_format", "table_alias", "reader_options", "reload_table", "max_load_rows", "task_parameters"]
-for parameter in parameter_list:
-    eval(f'dbutils.widgets.text("{parameter}", "")')
-    exec(f'{parameter} = dbutils.widgets.get("{parameter}")')
-    print(f'{parameter}: ', eval(f'{parameter}'))
+p_u = PipelineUtils()
+params = p_u.init_load_params()
+print(params)
 
-
-if reader_options:
-    reader_options = json.loads(reader_options)
-if max_load_rows:
-    max_load_rows = int(max_load_rows)
 
 #{"cloudFiles.schemaHints":"Data STRING", "cloudFiles.maxFileAge":"1 year", "cloudFiles.partitionColumns":""}
 #Reload.DEFAULT|Reload.CLEAR_CHECKPOINT|Reload.CLEAR_SCHEMA|Reload.DROP_TABLE|Reload.TRUNCATE_TABLE
@@ -25,15 +19,15 @@ if max_load_rows:
 
 # COMMAND ----------
 
-p = Pipeline(pipeline_run_id, default_catalog)
-load_id = p.load_table(target_table = target_table, \
-                    source_file = source_file, \
-                    file_format = file_format, \
-                    table_alias = "{catalog}_{db}_{table}" if not table_alias else table_alias, \
-                    reader_options = None if not reader_options else reader_options, \
+p = Pipeline(params.pipeline_run_id, params.default_catalog, params.pipeline_name)
+load_id = p.load_table(target_table = params.target_table, \
+                    source_file = params.source_file, \
+                    file_format = params.file_format, \
+                    table_alias = "{catalog}_{db}_{table}" if not params.table_alias else params.table_alias, \
+                    reader_options = None if not params.reader_options else params.reader_options, \
                     transform = [lambda df:df, lambda df:df], \
-                    reload_table = eval("Reload.DEFAULT" if not reload_table else reload_table), \
-                    max_load_rows = max_load_rows)
+                    reload_table = eval("Reload.DEFAULT" if not params.reload_table else params.reload_table), \
+                    max_load_rows = params.max_load_rows)
 
 # COMMAND ----------
 
@@ -44,6 +38,6 @@ load_id = p.load_table(target_table = target_table, \
 
 #Delete data older than 30 days
 try:
-    p.clear_table([target_table], (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d"))
+    p.clear_table([params.target_table], (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d"))
 except Exception as e:
     print(e)

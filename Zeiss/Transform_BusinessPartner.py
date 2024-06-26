@@ -1,6 +1,6 @@
 # Databricks notebook source
 from DatabricksHelper.Service import Pipeline
-from DatabricksHelper.ServiceUtilities import PipelineUtils
+from DatabricksHelper.ServiceUtils import PipelineUtils
 from pyspark.sql.types import StructType, StructField, StringType, BooleanType, ArrayType
 from pyspark.sql.functions import from_json, col
 from pyspark.sql.functions import udf
@@ -9,15 +9,10 @@ import json
 
 # COMMAND ----------
 
-dbutils.widgets.text("pipeline_run_id","")
-dbutils.widgets.text("default_catalog","evacatalog")
-dbutils.widgets.text("parameters","")
-#global parameters
-pipeline_run_id = dbutils.widgets.get("pipeline_run_id")
-default_catalog = dbutils.widgets.get("default_catalog")
-#task parameters
-parameters = dbutils.widgets.get("parameters")
-print(parameters)
+p_u = PipelineUtils()
+params = p_u.init_transform_params()
+p = Pipeline(params.pipeline_run_id, params.default_catalog, params.pipeline_name)
+print(params)
 
 # COMMAND ----------
 
@@ -157,21 +152,15 @@ def process_data(json_str):
             if "NationalAddressVersion" in data["BusinessPartners"] and not isinstance(data["BusinessPartners"]["NationalAddressVersion"], list):
                 data["BusinessPartners"]["NationalAddressVersion"] = [data["BusinessPartners"]["NationalAddressVersion"]]
             if "Roles" in data["BusinessPartners"] and not isinstance(data["BusinessPartners"]["Roles"], list):
-                data["BusinessPartners"]["Roles"] = [data["BusinessPartners"]["Roles"]]    
+                data["BusinessPartners"]["Roles"] = [data["BusinessPartners"]["Roles"]] 
+            if "MarketingAttributes" in data["BusinessPartners"] and not isinstance(data["BusinessPartners"]["MarketingAttributes"], list):
+                data["BusinessPartners"]["MarketingAttributes"] = [data["BusinessPartners"]["MarketingAttributes"]]
             return json.dumps(data, ensure_ascii=False)
         except:
             return None
     return None
     
  
-
-# COMMAND ----------
-
-p = Pipeline(pipeline_run_id, default_catalog)
-p_u = PipelineUtils()
-
-parameters = p.parse_task_param(parameters)
-print(parameters)
 
 # COMMAND ----------
 
@@ -184,9 +173,8 @@ load = p.get_load_info( \
 
 # COMMAND ----------
 
-#Transform_BusinessPartner insert businesspartner_temp
-p_u.cache("""
-select BusinessPartnerNumber,
+#Transform_BusinessPartner insert businesspartner_cache
+businesspartner_cache = p_u.cache(data = f"""select BusinessPartnerNumber,
        Data,
        file_path,
        received_time,
@@ -202,14 +190,14 @@ from (
               row_number()over(partition by Data.BusinessPartners.BusinessPartnerNumber order by  substr(_source_metadata.file_name,1,16) desc) rownum
          from businesspartner
 ) tab_bp
-where rownum = 1""", "businesspartner_temp")
+where rownum = 1""", view_name = "businesspartner_cache", catalog = params.default_catalog, stage_table = True)
 
 # COMMAND ----------
 
 # MAGIC %sql
 # MAGIC --Transform_BusinessPartner insert baisc_info
 # MAGIC delete from ${default_catalog}.bp.baisc_info 
-# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from ${default_catalog}.bp.businesspartner_temp);
+# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
 # MAGIC insert into ${default_catalog}.bp.baisc_info
 # MAGIC select BusinessPartnerNumber,
 # MAGIC         Data.BusinessPartners.BusinessPartnerGUID,
@@ -241,14 +229,14 @@ where rownum = 1""", "businesspartner_temp")
 # MAGIC         received_time,
 # MAGIC         _load_id,
 # MAGIC         _load_time
-# MAGIC from ${default_catalog}.bp.businesspartner_temp
+# MAGIC from businesspartner_cache
 
 # COMMAND ----------
 
 # MAGIC %sql
 # MAGIC --Transform_Business_create national_address_Version
 # MAGIC delete from ${default_catalog}.bp.national_address_Version
-# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from ${default_catalog}.bp.businesspartner_temp);
+# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
 # MAGIC insert into ${default_catalog}.bp.national_address_Version
 # MAGIC select 
 # MAGIC   BusinessPartnerNumber,
@@ -260,14 +248,14 @@ where rownum = 1""", "businesspartner_temp")
 # MAGIC   received_time,
 # MAGIC   _load_id,
 # MAGIC   _load_time
-# MAGIC from ${default_catalog}.bp.businesspartner_temp
+# MAGIC from businesspartner_cache
 
 # COMMAND ----------
 
 # MAGIC %sql
 # MAGIC --Transform_Business_create contact_persons
 # MAGIC delete from ${default_catalog}.bp.contact_persons
-# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from ${default_catalog}.bp.businesspartner_temp);
+# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
 # MAGIC insert into ${default_catalog}.bp.contact_persons
 # MAGIC select  BusinessPartnerNumber,
 # MAGIC         ContactPersons.ContactPersonNumber,
@@ -293,14 +281,14 @@ where rownum = 1""", "businesspartner_temp")
 # MAGIC             received_time,
 # MAGIC             _load_id,
 # MAGIC             _load_time
-# MAGIC        from ${default_catalog}.bp.businesspartner_temp)
+# MAGIC        from businesspartner_cache)
 
 # COMMAND ----------
 
 # MAGIC %sql
 # MAGIC --Transform_Business_create sales_areas
 # MAGIC delete from ${default_catalog}.bp.sales_areas
-# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from ${default_catalog}.bp.businesspartner_temp);
+# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
 # MAGIC insert into ${default_catalog}.bp.sales_areas
 # MAGIC select 
 # MAGIC   BusinessPartnerNumber,
@@ -329,14 +317,14 @@ where rownum = 1""", "businesspartner_temp")
 # MAGIC             received_time,
 # MAGIC             _load_id,
 # MAGIC             _load_time
-# MAGIC        from ${default_catalog}.bp.businesspartner_temp)
+# MAGIC        from businesspartner_cache)
 
 # COMMAND ----------
 
 # MAGIC %sql
 # MAGIC --Transform_Business_create Roles
 # MAGIC delete from ${default_catalog}.bp.bp_roles
-# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from ${default_catalog}.bp.businesspartner_temp);
+# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
 # MAGIC insert into ${default_catalog}.bp.bp_roles
 # MAGIC select 
 # MAGIC   BusinessPartnerNumber,
@@ -345,14 +333,14 @@ where rownum = 1""", "businesspartner_temp")
 # MAGIC   received_time,
 # MAGIC   _load_id,
 # MAGIC   _load_time
-# MAGIC from ${default_catalog}.bp.businesspartner_temp
+# MAGIC from businesspartner_cache
 
 # COMMAND ----------
 
 # MAGIC %sql
 # MAGIC --Transform_Business_create marketing_attributes
 # MAGIC delete from  ${default_catalog}.bp.marketing_attributes
-# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from ${default_catalog}.bp.businesspartner_temp);
+# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
 # MAGIC insert into ${default_catalog}.bp.marketing_attributes
 # MAGIC select 
 # MAGIC   BusinessPartnerNumber,
@@ -370,17 +358,17 @@ where rownum = 1""", "businesspartner_temp")
 # MAGIC             received_time,
 # MAGIC             _load_id,
 # MAGIC             _load_time
-# MAGIC        from ${default_catalog}.bp.businesspartner_temp)
+# MAGIC        from businesspartner_cache)
 
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC --select * from ${default_catalog}.bp.marketing_attributes
-# MAGIC --select * from  ${default_catalog}.bp.bp_roles
-# MAGIC --select * from  ${default_catalog}.bp.sales_areas
-# MAGIC --select * from ${default_catalog}.bp.contact_persons
-# MAGIC --select * from ${default_catalog}.bp.national_address_Version
-# MAGIC select * from ${default_catalog}.bp.baisc_info where BusinessPartnerNumber is null
+# MAGIC --truncate table  ${default_catalog}.bp.marketing_attributes
+# MAGIC --truncate table   ${default_catalog}.bp.bp_roles
+# MAGIC --truncate table   ${default_catalog}.bp.sales_areas
+# MAGIC --truncate table  ${default_catalog}.bp.contact_persons
+# MAGIC --truncate table  ${default_catalog}.bp.national_address_Version
+# MAGIC select * from  ${default_catalog}.bp.baisc_info where BusinessPartnerNumber is null --10289
 # MAGIC
 
 # COMMAND ----------

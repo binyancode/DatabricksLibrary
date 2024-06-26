@@ -3,11 +3,16 @@ from pyspark.sql.functions import udf, struct, from_json
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType
 import json
 
-@udf(StringType())
+schema = StructType([
+    StructField("is_valid", BooleanType(), True),
+    StructField("valid_result", IntegerType(), True)
+])
+
+@udf(schema)
 def process_data(row):
 
     json.loads('{}')
-    return str(row.json_struct.name2 is None)
+    return (True, 123)
 
 
 
