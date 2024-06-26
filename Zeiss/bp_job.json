@@ -28,5 +28,5 @@
     "task_cluster": {
         
     },
-    "automatic_cluster_allocation": false
+    "automatic_cluster_allocation": true
 }

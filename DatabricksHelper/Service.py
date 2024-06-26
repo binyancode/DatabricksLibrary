@@ -1,6 +1,6 @@
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.compute import ClusterInfo
-from databricks.sdk.service.jobs import JobTaskSettings, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, ListRunsRunType, Library, JobCluster, JobSettings, JobTaskSettings, NotebookTask,NotebookTaskSource
+from databricks.sdk.service.compute import ClusterDetails, ClusterSpec, Library, PythonPyPiLibrary 
+from databricks.sdk.service.jobs import Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, JobCluster, JobSettings, NotebookTask
 from pyspark.sql.functions import explode, col, lit, count, max, from_json
 from pyspark.sql.types import StructType, StructField, StringType,IntegerType
 from pyspark.sql import DataFrame, Observation, SparkSession
@@ -185,14 +185,14 @@ class PipelineService:
         return param
     
     spark_session:SparkSession
-    cluster:ClusterInfo
+    cluster:ClusterDetails
     host:str
     workspace_id:str
     workspace:WorkspaceClient
     api:PipelineAPI
     context:dict
     job:Optional[Job]
-    task:Optional[JobTaskSettings]
+    task:Optional[Task]
 
     def __init__(self, spark:SparkSession = None):
         self.session_id:str = str(uuid.uuid4())
@@ -446,7 +446,7 @@ class PipelineCluster(PipelineService):
 
     def __get_current_parallel_tasks(self, cluster_id) -> int:
         max_dop = 0
-        for base_run in self.workspace.jobs.list_runs(run_type=ListRunsRunType.JOB_RUN):
+        for base_run in self.workspace.jobs.list_runs(run_type=RunType.JOB_RUN):
             if base_run.state.life_cycle_state not in [RunLifeCycleState.TERMINATED, RunLifeCycleState.INTERNAL_ERROR, RunLifeCycleState.SKIPPED, RunLifeCycleState.TERMINATING]:
                 print(base_run.state.life_cycle_state)
                 run = self.workspace.jobs.get_run(base_run.run_id)
@@ -457,18 +457,18 @@ class PipelineCluster(PipelineService):
                 max_dop += self.__max_dop_tasks([task.as_dict() for task in tasks])
         return max_dop
 
-    def __install_libraries(self, task):
+    def __install_libraries(self, task:Task):
         depends_on_libraries = self.config["Job"]["Cluster"]["Libraries"]
         for depends_on_library in depends_on_libraries:
             for library_source, library_value in depends_on_library.items():
                 if library_source == "whl":
-                    for library in [library for library in task.libraries if "whl" in library and library["whl"] == library_value]:
+                    for library in [library for library in task.libraries if library.whl and library.whl == library_value]:
                         task.libraries.remove(library)
-                    task.libraries.append({"whl": library_value})
+                    task.libraries.append(Library(whl=library_value))
                 elif library_source == "pypi":
-                    for library in [library for library in task.libraries if "pypi" in library and library["pypi"]["package"] == library_value["package"]]:
+                    for library in [library for library in task.libraries if library.pypi and library.pypi.package == library_value["package"]]:
                         task.libraries.remove(library)
-                    task.libraries.append({"pypi": library_value})
+                    task.libraries.append(Library(pypi= PythonPyPiLibrary(package=library_value["package"])))
 
     def _assign_job_cluster(self, job_name):
         job = None
@@ -514,12 +514,10 @@ class PipelineCluster(PipelineService):
                                 job.settings.job_clusters.remove(cluster)
                         else:
                             job.settings.job_clusters = []
-                        job.settings.job_clusters.append(JobCluster(job_cluster_key).from_dict(job_cluster_def))
+                        job.settings.job_clusters.append(JobCluster(job_cluster_key, ClusterSpec().from_dict(job_cluster_def["new_cluster"])))
                         self.workspace.jobs.reset(job.job_id, job.settings)
                         print(f"Apply job cluster {job_cluster_key} for job: {job_name}")
 
-
-                
                 for task in job.settings.tasks:
                     if "task_job_cluster" in job_cluster_json:
                         for task_key, job_cluster_key in job_cluster_json["task_job_cluster"].items():
@@ -528,7 +526,7 @@ class PipelineCluster(PipelineService):
                                 if task.libraries is None:
                                     task.libraries = []
                                 self.__install_libraries(task)
-                                
+
                                 self.workspace.jobs.reset(job.job_id, job.settings)
                                 print(f"Apply job cluster {job_cluster_key} for task: {task.task_key}")
 
