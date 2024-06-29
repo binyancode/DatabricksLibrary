@@ -36,12 +36,12 @@ else:
 #from databricks.sdk.service.compute import ClusterDetails, ClusterSpec, Library, PythonPyPiLibrary 
 #from databricks.sdk.service.jobs import Run, Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, JobCluster, JobSettings, NotebookTask
 from pyspark.sql.functions import explode, col, lit, count, max, from_json, udf, struct
-from pyspark.sql.types import StructType, StructField, StringType,IntegerType,ArrayType,BooleanType
+from pyspark.sql.types import *
 from pyspark.sql import DataFrame, Observation, SparkSession
 from typing import Callable
 from pyspark.sql.streaming import StreamingQueryListener, StreamingQuery
 from pyspark.sql.streaming.listener import QueryProgressEvent, StreamingQueryProgress
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 from urllib.parse import unquote
 from enum import IntFlag
@@ -368,10 +368,8 @@ class StreamingMetrics:
     def add_row_count(self, cnt):
         self.__lock.acquire()
         try:
-            # 在这里进行排他性写入
             self.row_count += cnt
         finally:
-            # 释放锁
             self.__lock.release()
     def as_dict(self):
         return {"row_count":self.row_count}
@@ -388,7 +386,7 @@ class StreamingListener(StreamingQueryListener):
             print(f"{row.load_id}-{row.cnt} rows processed!")
 
             self.metrics.add_row_count(row.cnt)
-            print(f"Current row count: {self.metrics.row_count}")
+            print(f"{datetime.now(timezone.utc).replace(microsecond=0).strftime('%Y-%m-%d %H:%M:%S')} Processed row count: {self.metrics.row_count}")
             if self.progress is not None:
                 self.progress(self.metrics, event.progress, self.max_load_rows)
 
@@ -779,12 +777,12 @@ class Pipeline(PipelineCluster):
         validation_schema = StructType([
             StructField("is_valid", BooleanType(), True),
             StructField("validation_result", IntegerType(), True),
-            StructField("results", ArrayType(
+            StructField("validations", ArrayType(
                 StructType([
-                    StructField("rule_name", StringType(), True),
-                    StructField("validation_result", IntegerType(), True),
-                    StructField("error_message", StringType()),
-                    StructField("fixed_data", StringType())
+                    StructField("name", StringType(), True),
+                    StructField("result", IntegerType(), True),
+                    StructField("message", StringType()),
+                    StructField("data", StringType())
                 ])
             ), True)
         ])
@@ -792,26 +790,30 @@ class Pipeline(PipelineCluster):
         @udf(validation_schema)
         def process_validations(row):
             is_valid = True
-            results = []
-            validation_result = 0
+            validations = []
+            validation_result = sys.maxsize
             try:
                 if streaming_processor_obj:
-                    results = streaming_processor_obj.validate(row)
-                    if results:
-                        for result in results:
-                            if result["validation_result"] < 0:
+                    validations = streaming_processor_obj.validate(row)
+                    if validations:
+                        if not isinstance(validations, list):
+                            validations = [validations]
+
+                        for validation in validations:
+                            if validation["result"] < 0:
                                 is_valid = False
-                            validation_result = result["validation_result"] if result["validation_result"] > validation_result else validation_result
+                            validation_result = validation["result"] if validation["result"] < validation_result else validation_result
                     else:
-                        results = []
+                        validations = []
             except Exception as ex:
-                return {"is_valid": False, "validation_result": validation_result, "results": [{"rule_name":"validation_exception","validation_result":0, "error_message":str(ex)}]}
-            return {"is_valid": is_valid, "validation_result": validation_result, "results": results}
+                return {"is_valid": False, "validation_result": validation_result, "validations": [{"name":"validation_exception","result":0, "message":str(ex)}]}
+            return {"is_valid": is_valid, "validation_result": validation_result, "validations": validations}
 
         df = df.withColumn("_validations", process_validations(struct([df[col] for col in df.columns])))
                 
         process_functions = {}
-        for field in [field for field in df.schema.fields if field.name in streaming_processor_obj.with_columns()]:
+        ignore_columns = ["_rescued_data", "_source_metadata", "_load_id", "_load_time", "_validations"]
+        for field in [field for field in df.schema.fields if field.name in streaming_processor_obj.with_columns() and field.name not in ignore_columns]:
             print(f"{field.name}")
             func_script = f"""
 @udf({field.dataType})
@@ -828,7 +830,7 @@ process_functions["{field.name}"] = process_{field.name}
 
         return df
 
-    def load_table(self, target_table, source_file, file_format, table_alias = None, reader_options = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1, validation = None):
+    def load_table(self, target_table, source_file, file_format, table_alias = None, reader_options = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1, streaming_processor = None):
         source_file = self.__parse_task_param(source_file)
         target_table = self.__parse_task_param(target_table)
         file_format = self.__parse_task_param(file_format)
@@ -836,7 +838,7 @@ process_functions["{field.name}"] = process_{field.name}
         reader_options = self.__parse_task_param(reader_options)
         max_load_rows = self.__parse_task_param(max_load_rows)
         reload_table = self.__parse_task_param(reload_table)
-        validation = self.__parse_task_param(validation)
+        streaming_processor = self.__parse_task_param(streaming_processor)
 
         print(f"target_table:{target_table}")
         print(f"source_file:{source_file}")
@@ -845,7 +847,7 @@ process_functions["{field.name}"] = process_{field.name}
         print(f"reader_options:{reader_options}")
         print(f"transform:{transform}")
         print(f"reload_table:{reload_table}")
-        print(f"validation:{validation}")
+        print(f"streaming_processor:{streaming_processor}")
 
 
         self.__get_last_load()
@@ -895,7 +897,7 @@ process_functions["{field.name}"] = process_{field.name}
         if read_transform is not None and callable(read_transform) and len(inspect.signature(read_transform).parameters) == 1:
             df = read_transform(df)
 
-        df = self.__table_loading_streaming_process(df, validation)
+        df = self.__table_loading_streaming_process(df, streaming_processor)
 
         print(df.schema)
         df = df.observe("metrics", count(lit(1)).alias("cnt"), max(lit(load_id)).alias("load_id"))
