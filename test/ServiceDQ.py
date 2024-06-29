@@ -123,7 +123,7 @@ SELECT *
 FROM t
 WHERE EXISTS (
     SELECT 1
-    FROM explode(t.validations) AS v
+    FROM explode(t.validations.results) AS v
     WHERE v.a = 1
 )
 

@@ -24,9 +24,11 @@ import databricks.sdk
 print("databricks sdk version:", databricks.sdk.version.__version__)
 
 if check_class_in_module('databricks.sdk.service.compute', 'ClusterDetails'):
+    from databricks.sdk.service.workspace import ExportFormat, ExportResponse
     from databricks.sdk.service.compute import ClusterDetails, ClusterSpec, Library, PythonPyPiLibrary 
     from databricks.sdk.service.jobs import Run, Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, JobCluster, JobSettings, NotebookTask
 else:
+    from databricks.sdk.service.workspace import ExportFormat, ExportResponse
     from databricks.sdk.service.compute import ClusterInfo as ClusterDetails, Library, PythonPyPiLibrary 
     from databricks.sdk.service.jobs import BaseClusterInfo as ClusterSpec, Run, JobTaskSettings as Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, JobCluster, JobSettings, NotebookTask
 
@@ -57,6 +59,7 @@ import inspect
 import re
 import threading
 import requests
+import base64
 
 class Reload(IntFlag):
     DEFAULT = 0
@@ -738,15 +741,25 @@ class Pipeline(PipelineCluster):
         if streaming_processor:
             path = streaming_processor
         elif self.task and self.job:
-            path = os.path.join(self.config["Data"]["StreamingProcessor"]["Path"], self.workspace_id, self.job.settings.name, f"{self.task.task_key}.py")
-        print(f"Streaming processor path: {path}")
+            path = os.path.join(self.config["Data"]["StreamingProcessor"]["Path"], self.job.settings.name, f"{self.task.task_key}")
+
+        print(f"Streaming processor path: {path}")   
         locals_before = dict(locals())
-        if os.path.exists(path):
-            with open(path, 'r') as file:
-                # globals_dict = globals()
-                # globals_dict['TableLoadingValidation'] = TableLoadingValidation
-                exec(file.read())
-                print(f"Streaming processor file loaded")
+        # if os.path.exists(path):
+        #     with open(path, 'r') as file:
+        #         # globals_dict = globals()
+        #         # globals_dict['TableLoadingValidation'] = TableLoadingValidation
+        #         exec(file.read())
+        #         print(f"Streaming processor file loaded")
+        
+        try:
+            export:ExportResponse = self.workspace.workspace.export(path, format=ExportFormat.SOURCE)
+            decoded_bytes = base64.b64decode(export.content)
+            decoded_string = decoded_bytes.decode("utf-8")
+            exec(decoded_string)
+        except Exception as ex:
+            print(f"Cannot load streaming processor file: {ex}")
+
         locals_after = dict(locals())
         new_locals = {k: v for k, v in locals_after.items() if k not in locals_before}
         new_classes = {name: obj for name, obj in new_locals.items() if isinstance(obj, (type))}

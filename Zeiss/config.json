@@ -29,7 +29,7 @@
             "Path": "/Volumes/evacatalog/workflow/schemas/"
         },
         "StreamingProcessor": {
-            "Path": "/Volumes/evacatalog/workflow/streaming_processors/"
+            "Path": "/Workspace/eVA/streaming_processors/"
         },
         "ReaderOptions": {}
     },
