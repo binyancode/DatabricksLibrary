@@ -1,19 +1,53 @@
+import importlib
+from typing import Tuple
+
+def check_class_in_module(module_name, class_name):
+    try:
+        module = importlib.import_module(module_name)
+        return hasattr(module, class_name)
+    except ImportError:
+        return False
+
+def get_class_in_module(module_name, class_name:Tuple[str, str]):
+    try:
+        module = importlib.import_module(module_name)
+        if hasattr(module, class_name[0]):
+                class_name = class_name[0]
+        else:
+            class_name = class_name[1]
+        return getattr(module, class_name)
+    except ImportError:
+        return None
+    
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.compute import ClusterDetails, ClusterSpec, Library, PythonPyPiLibrary 
-from databricks.sdk.service.jobs import Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, JobCluster, JobSettings, NotebookTask
-from pyspark.sql.functions import explode, col, lit, count, max, from_json
-from pyspark.sql.types import StructType, StructField, StringType,IntegerType
+import databricks.sdk
+print("databricks sdk version:", databricks.sdk.version.__version__)
+
+if check_class_in_module('databricks.sdk.service.compute', 'ClusterDetails'):
+    from databricks.sdk.service.compute import ClusterDetails, ClusterSpec, Library, PythonPyPiLibrary 
+    from databricks.sdk.service.jobs import Run, Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, JobCluster, JobSettings, NotebookTask
+else:
+    from databricks.sdk.service.compute import ClusterInfo as ClusterDetails, Library, PythonPyPiLibrary 
+    from databricks.sdk.service.jobs import BaseClusterInfo as ClusterSpec, Run, JobTaskSettings as Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, JobCluster, JobSettings, NotebookTask
+
+
+#from databricks.sdk.service.compute import ClusterDetails, ClusterSpec, Library, PythonPyPiLibrary 
+#from databricks.sdk.service.jobs import Run, Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, JobCluster, JobSettings, NotebookTask
+from pyspark.sql.functions import explode, col, lit, count, max, from_json, udf, struct
+from pyspark.sql.types import StructType, StructField, StringType,IntegerType,ArrayType,BooleanType
 from pyspark.sql import DataFrame, Observation, SparkSession
 from typing import Callable
 from pyspark.sql.streaming import StreamingQueryListener, StreamingQuery
 from pyspark.sql.streaming.listener import QueryProgressEvent, StreamingQueryProgress
-from datetime import datetime
+from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from urllib.parse import unquote
 from enum import IntFlag
 from types import SimpleNamespace
 from types import MethodType
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
+from abc import ABC, abstractmethod
+import sys
 import uuid
 import json
 import os
@@ -35,6 +69,17 @@ class DataReader:
     def __init__(self, data, load_id):
         self.data = data
         self.load_id = load_id
+
+class TableLoadingValidationResult:
+    def __init__(self, rule_name:str, validation_result:int, error_message:str):
+        self.rule_name = rule_name
+        self.validation_result = validation_result #<=0:error, >= 1:pass
+        self.error_message = error_message
+
+class TableLoadingValidation(ABC):
+    @abstractmethod
+    def validate(sel, row) -> dict:
+        pass
 
 class PipelineAPI:
     def request(self, method, path, data = None, headers = None):
@@ -460,12 +505,12 @@ class PipelineCluster(PipelineService):
     def __install_libraries(self, task:Task):
         depends_on_libraries = self.config["Job"]["Cluster"]["Libraries"]
         for depends_on_library in depends_on_libraries:
-            for library_source, library_value in depends_on_library.items():
-                if library_source == "whl":
+            for library_type, library_value in depends_on_library.items():
+                if library_type == "whl":
                     for library in [library for library in task.libraries if library.whl and library.whl == library_value]:
                         task.libraries.remove(library)
                     task.libraries.append(Library(whl=library_value))
-                elif library_source == "pypi":
+                elif library_type == "pypi":
                     for library in [library for library in task.libraries if library.pypi and library.pypi.package == library_value["package"]]:
                         task.libraries.remove(library)
                     task.libraries.append(Library(pypi= PythonPyPiLibrary(package=library_value["package"])))
@@ -556,25 +601,30 @@ class PipelineCluster(PipelineService):
 class Pipeline(PipelineCluster):
     streaming_listener = None
 
-    def repair_run(self, job_name:str, params = None):
-        if self.last_run.run_id and self.last_run.job_run_result in ("FAILED", "TIMEDOUT", "CANCELED"):
+    def repair_run(self, job_name:str, params = None, timeout = 3600):
+        if self.last_run.job_run_id and self.last_run.job_run_result in ("FAILED", "TIMEDOUT", "CANCELED"):
             self.logs.log("operations", { "operation": f're-run job:{job_name}' })
             
-            wait_run = self.workspace.jobs.repair_run(self.last_run.run_id, latest_repair_id=self.last_run.latest_repair_id, notebook_params=params, rerun_all_failed_tasks=True)
+            wait_run = self.workspace.jobs.repair_run(self.last_run.job_run_id, latest_repair_id=self.last_run.latest_repair_id, notebook_params=params, rerun_all_failed_tasks=True)
             print(f"Re-running the job {job_name} with status {self.last_run.job_run_result}.")
 
-            return self.__running(wait_run)
+            return self.__running(wait_run, timeout)
         else:
             print(f"Skip re-running the job {job_name} with status {self.last_run.job_run_result}.")
             return None
 
-    def __running(self, wait_run):
-        self.logs.log("job_runs", wait_run.response.as_dict(), True)
+    def __running(self, wait_run:Wait[Run], timeout = 3600):
+        response = wait_run.response.as_dict()
+        self.logs.log("job_runs", response, True)
         def run_callback(run_return):
             if run_return.state.life_cycle_state != RunLifeCycleState.RUNNING:
                 result_dict = run_return.as_dict()
                 self.logs.log("job_run_results", result_dict, True)  
-        run = wait_run.result(callback=run_callback) 
+        try:
+            run = wait_run.result(callback=run_callback, timeout=timedelta(seconds=timeout)) 
+        except TimeoutError as ex:
+            self.workspace.jobs.cancel_run_and_wait(response["run_id"])
+            raise ex
         print(f"Run job {run.run_name} {run.state.result_state}")
         result_dict = run.as_dict()
         self.logs.log("job_run_results", result_dict)
@@ -582,19 +632,19 @@ class Pipeline(PipelineCluster):
         print(f"{json.dumps(result_dict)}\n")
         return result_dict
 
-    def run(self, job_name:str, params = None, continue_run = True):
+    def run(self, job_name:str, params = None, continue_run = True, timeout = 3600):
         self.__get_last_run()
         continue_status = True
         index = 0
         while continue_status:
             index+=1
-            run, continue_status = self.run_internal(job_name, params)
+            run, continue_status = self.run_internal(job_name, params, timeout)
             if not continue_run or not continue_status:
                 return run
             else:
                 print(f"Continue run: {index}")
 
-    def run_internal(self, job_name:str, params = None):
+    def run_internal(self, job_name:str, params = None, timeout = 3600):
         #print(self.pipeline_cluster.cluster)
         print(f"Current cluster: {self.cluster.cluster_id}({self.cluster.cluster_name})")
 
@@ -603,7 +653,7 @@ class Pipeline(PipelineCluster):
         self._assign_job_cluster(job_name)
 
         if self.last_run.job_run_id:
-            run = self.repair_run(job_name, params)
+            run = self.repair_run(job_name, params, timeout)
             if run:
                 return (run, False)
 
@@ -616,7 +666,7 @@ class Pipeline(PipelineCluster):
         self.logs.log("operations", { "operation": f'run job:{job_name}' })
         wait_run = self.workspace.jobs.run_now(job_id, notebook_params=params)
         print(f"Running the job {job_name}.")
-        return (self.__running(wait_run), self.__check_continue(job_name))
+        return (self.__running(wait_run, timeout), self.__check_continue(job_name))
 
     def __read_data(self, source_file, file_format, schema_dir, reader_options = None):
         if not self.last_load.load_info or self.last_load.load_info["status"] == "succeeded":
@@ -679,8 +729,69 @@ class Pipeline(PipelineCluster):
         else:
             return source
     
+    def __get_validation(self, df, validation):
+        if validation:
+            path = validation
+        elif self.task and self.job:
+            path = os.path.join(self.config["Data"]["Validation"]["Path"], self.workspace_id, self.job.settings.name, f"{self.task.task_key}.py")
+        print(f"Validation path: {path}")
+        locals_before = dict(locals())
+        if os.path.exists(path):
+            with open(path, 'r') as file:
+                # globals_dict = globals()
+                # globals_dict['TableLoadingValidation'] = TableLoadingValidation
+                exec(file.read())
+                print(f"Validation file loaded")
+        locals_after = dict(locals())
+        new_locals = {k: v for k, v in locals_after.items() if k not in locals_before}
+        new_classes = {name: obj for name, obj in new_locals.items() if isinstance(obj, (type))}
 
-    def load_table(self, target_table, source_file, file_format, table_alias = None, reader_options = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1):
+        validation_obj = None
+        for name, tp in new_classes.items():
+            if issubclass(tp, TableLoadingValidation) and tp is not TableLoadingValidation:
+                validation_obj = tp()
+                print(f"Validation object loaded: {validation_obj}")
+        
+        # for name, obj in globals().items():
+        #     if isinstance(obj, type):  # 确保是一个类
+        #         if issubclass(obj, TableLoadingValidation) and obj is not TableLoadingValidation:  # 检查是否是A的子类，排除A本身
+        #             validation_obj = obj()
+        #             print(f"Validation object loaded: {validation_obj}")
+
+        validation_schema = StructType([
+            StructField("is_valid", BooleanType(), True),
+            StructField("validation_result", IntegerType(), True),
+            StructField("results", ArrayType(
+                StructType([
+                    StructField("rule_name", StringType(), True),
+                    StructField("validation_result", IntegerType(), True),
+                    StructField("error_message", StringType()),
+                    StructField("fixed_data", StringType())
+                ])
+            ), True)
+        ])
+        
+        @udf(validation_schema)
+        def process_validations(row):
+            is_valid = True
+            results = []
+            validation_result = sys.maxsize
+            try:
+                if validation_obj:
+                    results = validation_obj.validate(row)
+                    if results:
+                        for result in results:
+                            if result["validation_result"] <= 0:
+                                is_valid = False
+                            validation_result = result["validation_result"] if result["validation_result"] < validation_result else validation_result
+                    else:
+                        results = []
+            except Exception as ex:
+                return {"is_valid": False, "validation_result": validation_result, "results": [{"rule_name":"validation_exception","validation_result":0, "error_message":str(ex)}]}
+            return {"is_valid": is_valid, "validation_result": validation_result, "results": results}
+        return df.withColumn("_validations", process_validations(struct([df[col] for col in df.columns])))
+
+    def load_table(self, target_table, source_file, file_format, table_alias = None, reader_options = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1, validation = None):
         source_file = self.__parse_task_param(source_file)
         target_table = self.__parse_task_param(target_table)
         file_format = self.__parse_task_param(file_format)
@@ -688,6 +799,7 @@ class Pipeline(PipelineCluster):
         reader_options = self.__parse_task_param(reader_options)
         max_load_rows = self.__parse_task_param(max_load_rows)
         reload_table = self.__parse_task_param(reload_table)
+        validation = self.__parse_task_param(validation)
 
         print(f"target_table:{target_table}")
         print(f"source_file:{source_file}")
@@ -696,6 +808,8 @@ class Pipeline(PipelineCluster):
         print(f"reader_options:{reader_options}")
         print(f"transform:{transform}")
         print(f"reload_table:{reload_table}")
+        print(f"validation:{validation}")
+
 
         self.__get_last_load()
 
@@ -743,6 +857,9 @@ class Pipeline(PipelineCluster):
     
         if read_transform is not None and callable(read_transform) and len(inspect.signature(read_transform).parameters) == 1:
             df = read_transform(df)
+
+        df = self.__get_validation(df, validation)
+
         print(df.schema)
         df = df.observe("metrics", count(lit(1)).alias("cnt"), max(lit(load_id)).alias("load_id"))
         df = df.writeStream
@@ -889,6 +1006,7 @@ class Pipeline(PipelineCluster):
                             SELECT * 
                             FROM {load_info["table"]} 
                             WHERE _load_id = '{load_info["load_id"]}' 
+                            and _validations.is_valid = TRUE
                             """
                         catalog = ""
                         db = ""
@@ -933,6 +1051,7 @@ class Pipeline(PipelineCluster):
                         FROM {temp_table}
                         WHERE _load_time = (SELECT MAX(_load_time) FROM {temp_table})
                     )
+                    and _validations.is_valid = TRUE
                     """
                 temp_df = self.spark_session.sql(query)
                 if transform is not None and temp_view in transform:

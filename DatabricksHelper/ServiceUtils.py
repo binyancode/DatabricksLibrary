@@ -63,7 +63,7 @@ class PipelineUtils:
         params = {}
         for parameter in parameter_list:
             name = parameter[0] if isinstance(parameter, tuple) else parameter
-            default_value = parameter[1] if isinstance(parameter, tuple) else ""
+            default_value = parameter[1] if isinstance(parameter, tuple) and len(parameter) > 1 else ""
             eval(f'self.pipeline_service.databricks_dbutils.widgets.text("{name}", "{default_value}")')
             exec(f'params["{name}"] = self.pipeline_service.databricks_dbutils.widgets.get("{name}")')
             if isinstance(parameter, tuple) and len(parameter) > 2:
@@ -74,7 +74,7 @@ class PipelineUtils:
     def init_run_params(self):
         parameter_list = ["pipeline_run_id", "pipeline_name", "job_name", "default_catalog", "target_table", \
                           "source_file", "file_format", "table_alias", "reader_options", "reload_table", \
-                            "max_load_rows", ("continue_run", "True", "bool"), "task_parameters"]
+                            "max_load_rows", ("continue_run", "True", "bool"), ("timeout", "3600", "int"), "task_parameters"]
         params = self.__init_params(parameter_list)
         params["job_params"] = {}
         for key, value in params.items():
@@ -86,7 +86,7 @@ class PipelineUtils:
     def init_load_params(self):
         parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "target_table", \
                           "source_file", "file_format", "table_alias", ("reader_options","{}","json.loads"), \
-                            ("reload_table", "Reload.DEFAULT"), ("max_load_rows", "-1", "int"), "task_parameters"]
+                            ("reload_table", "Reload.DEFAULT"), ("max_load_rows", "-1", "int"), "validation", "task_parameters"]
         params = self.__init_params(parameter_list)
         params = SimpleNamespace(**params)
         return params

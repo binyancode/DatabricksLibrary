@@ -28,6 +28,9 @@
         "Schema": {
             "Path": "/Volumes/evacatalog/workflow/schemas/"
         },
+        "Validation": {
+            "Path": "/Volumes/evacatalog/workflow/validations/"
+        },
         "ReaderOptions": {}
     },
     "Log": {
