@@ -76,10 +76,15 @@ class TableLoadingValidationResult:
         self.validation_result = validation_result #<=0:error, >= 1:pass
         self.error_message = error_message
 
-class TableLoadingValidation(ABC):
-    @abstractmethod
-    def validate(sel, row) -> dict:
-        pass
+class TableLoadingStreamingProcessor(ABC):
+    def validate(self, row) -> dict:
+        return []
+
+    def with_columns(self) -> list:
+        return []
+
+    def process_cell(self, row, column_name, validations):
+        return row[column_name]
 
 class PipelineAPI:
     def request(self, method, path, data = None, headers = None):
@@ -729,28 +734,28 @@ class Pipeline(PipelineCluster):
         else:
             return source
     
-    def __get_validation(self, df, validation):
-        if validation:
-            path = validation
+    def __table_loading_streaming_process(self, df, streaming_processor = None):
+        if streaming_processor:
+            path = streaming_processor
         elif self.task and self.job:
-            path = os.path.join(self.config["Data"]["Validation"]["Path"], self.workspace_id, self.job.settings.name, f"{self.task.task_key}.py")
-        print(f"Validation path: {path}")
+            path = os.path.join(self.config["Data"]["StreamingProcessor"]["Path"], self.workspace_id, self.job.settings.name, f"{self.task.task_key}.py")
+        print(f"Streaming processor path: {path}")
         locals_before = dict(locals())
         if os.path.exists(path):
             with open(path, 'r') as file:
                 # globals_dict = globals()
                 # globals_dict['TableLoadingValidation'] = TableLoadingValidation
                 exec(file.read())
-                print(f"Validation file loaded")
+                print(f"Streaming processor file loaded")
         locals_after = dict(locals())
         new_locals = {k: v for k, v in locals_after.items() if k not in locals_before}
         new_classes = {name: obj for name, obj in new_locals.items() if isinstance(obj, (type))}
 
-        validation_obj = None
+        streaming_processor_obj = None
         for name, tp in new_classes.items():
-            if issubclass(tp, TableLoadingValidation) and tp is not TableLoadingValidation:
-                validation_obj = tp()
-                print(f"Validation object loaded: {validation_obj}")
+            if issubclass(tp, TableLoadingStreamingProcessor) and tp is not TableLoadingStreamingProcessor:
+                streaming_processor_obj = tp()
+                print(f"Streaming processor object loaded: {streaming_processor_obj}")
         
         # for name, obj in globals().items():
         #     if isinstance(obj, type):  # 确保是一个类
@@ -775,21 +780,40 @@ class Pipeline(PipelineCluster):
         def process_validations(row):
             is_valid = True
             results = []
-            validation_result = sys.maxsize
+            validation_result = 0
             try:
-                if validation_obj:
-                    results = validation_obj.validate(row)
+                if streaming_processor_obj:
+                    results = streaming_processor_obj.validate(row)
                     if results:
                         for result in results:
-                            if result["validation_result"] <= 0:
+                            if result["validation_result"] < 0:
                                 is_valid = False
-                            validation_result = result["validation_result"] if result["validation_result"] < validation_result else validation_result
+                            validation_result = result["validation_result"] if result["validation_result"] > validation_result else validation_result
                     else:
                         results = []
             except Exception as ex:
                 return {"is_valid": False, "validation_result": validation_result, "results": [{"rule_name":"validation_exception","validation_result":0, "error_message":str(ex)}]}
             return {"is_valid": is_valid, "validation_result": validation_result, "results": results}
-        return df.withColumn("_validations", process_validations(struct([df[col] for col in df.columns])))
+
+        df = df.withColumn("_validations", process_validations(struct([df[col] for col in df.columns])))
+                
+        process_functions = {}
+        for field in [field for field in df.schema.fields if field.name in streaming_processor_obj.with_columns()]:
+            print(f"{field.name}")
+            func_script = f"""
+@udf({field.dataType})
+def process_{field.name}(row, column_name, validations):
+    return streaming_processor_obj.process_cell(row, column_name, validations)
+
+process_functions["{field.name}"] = process_{field.name}
+"""
+            globals_dict = globals()
+            globals_dict["streaming_processor_obj"] = streaming_processor_obj
+            globals_dict["process_functions"] = process_functions
+            exec(func_script, globals_dict)
+            df = df.withColumn(field.name, process_functions[field.name](struct([df[col] for col in df.columns]), lit(field.name), df["_validations"]))
+
+        return df
 
     def load_table(self, target_table, source_file, file_format, table_alias = None, reader_options = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1, validation = None):
         source_file = self.__parse_task_param(source_file)
@@ -858,7 +882,7 @@ class Pipeline(PipelineCluster):
         if read_transform is not None and callable(read_transform) and len(inspect.signature(read_transform).parameters) == 1:
             df = read_transform(df)
 
-        df = self.__get_validation(df, validation)
+        df = self.__table_loading_streaming_process(df, validation)
 
         print(df.schema)
         df = df.observe("metrics", count(lit(1)).alias("cnt"), max(lit(load_id)).alias("load_id"))

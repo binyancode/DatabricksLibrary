@@ -28,8 +28,8 @@
         "Schema": {
             "Path": "/Volumes/evacatalog/workflow/schemas/"
         },
-        "Validation": {
-            "Path": "/Volumes/evacatalog/workflow/validations/"
+        "StreamingProcessor": {
+            "Path": "/Volumes/evacatalog/workflow/streaming_processors/"
         },
         "ReaderOptions": {}
     },
