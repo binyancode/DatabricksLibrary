@@ -309,6 +309,7 @@ class PipelineService:
 
 
 class LogService:
+    __lock = threading.Lock()
     def log(self, category, content, flush = False):
         if isinstance(content, str):
             content = json.loads(content)
@@ -319,15 +320,21 @@ class LogService:
             self.flush_log()
 
     def flush_log(self):
-        log_dir = self.log_path
-        if not os.path.exists(log_dir):
-            try:
-                os.makedirs(log_dir)
-            except OSError as e:
-                print(e)
-                pass
-        with open(self.log_file, 'w') as file:
-            file.write(json.dumps(self.logs, indent=4))
+        self.__lock.acquire()
+        try:
+            log_dir = self.log_path
+            flushed = False
+            while not flushed:
+                try:
+                    if not os.path.exists(log_dir):
+                        os.makedirs(log_dir)
+                    with open(self.log_file, 'w') as file:
+                        file.write(json.dumps(self.logs, indent=4))
+                        flushed = True
+                except Exception as e:#OSError as e:
+                    print(log_dir, e)
+        finally:
+            self.__lock.release()
 
     def get_last_log(self, category, path):
         if category in self.logs:
@@ -358,13 +365,32 @@ class LogService:
         self.pipeline_run_id = pipeline_run_id
         self.log_path = log_path
         self.log_file = os.path.join(self.log_path, f"{self.pipeline_run_id}.json")
+        print(f"Log file: {self.log_file}")
         self.logs = self.read_log()
 
 class StreamingMetrics:
     row_count:int = 0
+    streaming_status:str = "Running" #Running, Finished, Stopped
+    life_cycle_status:str = "Running" #Running, Finished, Terminated
     __lock = threading.Lock()
-    def reset(self):
-        self.row_count = 0
+    
+    def terminate(self):
+        self.__lock.acquire()
+        try:
+            if self.streaming_status == "Running":
+                self.streaming_status = "Finished"
+                self.life_cycle_status = "Finished"
+            else:
+                self.life_cycle_status = "Terminated"
+        finally:
+            self.__lock.release()
+
+    def stop(self):
+        self.__lock.acquire()
+        try:
+            self.streaming_status = "Stopped"
+        finally:
+            self.__lock.release()
     def add_row_count(self, cnt):
         self.__lock.acquire()
         try:
@@ -372,7 +398,7 @@ class StreamingMetrics:
         finally:
             self.__lock.release()
     def as_dict(self):
-        return {"row_count":self.row_count}
+        return {"row_count":self.row_count, "streaming_status": self.streaming_status, "life_cycle_status": self.life_cycle_status}
 
 class StreamingListener(StreamingQueryListener):
     def onQueryStarted(self, event):
@@ -389,8 +415,12 @@ class StreamingListener(StreamingQueryListener):
             print(f"{datetime.now(timezone.utc).replace(microsecond=0).strftime('%Y-%m-%d %H:%M:%S')} Processed row count: {self.metrics.row_count}")
             if self.progress is not None:
                 self.progress(self.metrics, event.progress, self.max_load_rows)
+            self.logs.log("streaming", {"metrics":self.metrics.as_dict(), "max_load_rows":self.max_load_rows, "continue_status":False or self.metrics.streaming_status == "Stopped"}, True)
+
 
     def onQueryTerminated(self, event):
+        self.metrics.terminate()
+        self.logs.log("streaming", {"metrics":self.metrics.as_dict(), "max_load_rows":self.max_load_rows, "continue_status":False or self.metrics.streaming_status == "Stopped"}, True)
         print(f"stream terminated!")
 
     logs:LogService
@@ -714,11 +744,13 @@ class Pipeline(PipelineCluster):
 
     def __check_continue(self, job_name):
         job = self.workspace.jobs.get(self._get_job_id(job_name))
+        continue_status = False
         for task in job.settings.tasks:
             logs = self.__init_logs(job, task)
             if logs.get_last_log("streaming", ["continue_status"]):
-                return True
-        return False
+                continue_status = True
+                print(f"Continue status: {continue_status}")
+        return continue_status
 
     def __parse_task_param(self, source):
         source = self.parse_task_param(source)
@@ -981,7 +1013,7 @@ process_functions["{field.name}"] = process_{field.name}
             self.spark_session.streams.resetTerminated() # Otherwise awaitAnyTermination() will return immediately after first stream has terminated
             self.spark_session.streams.awaitAnyTermination()
             time.sleep(0.1)
-        self.streaming_metrics.reset()
+        self.streaming_metrics.terminate()
 
     def __truncate_table(self, table, clear_type):
         try:
@@ -1162,7 +1194,7 @@ process_functions["{field.name}"] = process_{field.name}
     def __streaming_progress(self, metrics: StreamingMetrics, progress: StreamingQueryProgress, max_load_rows):
         if max_load_rows < 0:
             return
-        if metrics.row_count > max_load_rows:
+        if metrics.row_count >= max_load_rows:
             if not self.spark_session:
                 self._init_databricks()
             for stream in self.spark_session.streams.active:
@@ -1170,11 +1202,8 @@ process_functions["{field.name}"] = process_{field.name}
                 print(f"Current streaming : {progress.id} {progress.runId} ")
                 print(f"Stop streaming with row count: {metrics.row_count}")
                 print(f"Stop streaming : {stream.id} {stream.runId}")
-                self.logs.log("streaming", {"metrics":metrics.as_dict(), "max_load_rows":max_load_rows, "continue_status":True}, True)
-                metrics.reset()
+                metrics.stop()
                 stream.stop()
-        else:
-            self.logs.log("streaming", {"metrics":metrics.as_dict(), "max_load_rows":max_load_rows, "continue_status":False}, True)
 
     def __add_streaming_listener(self, max_load_rows = -1):
         if Pipeline.streaming_listener is None:
