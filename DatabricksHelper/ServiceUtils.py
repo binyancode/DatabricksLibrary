@@ -74,7 +74,8 @@ class PipelineUtils:
     def init_run_params(self):
         parameter_list = ["pipeline_run_id", "pipeline_name", "job_name", "default_catalog", "target_table", \
                           "source_file", "file_format", "table_alias", "reader_options", "reload_table", \
-                            "max_load_rows", ("continue_run", "True", "bool"), ("timeout", "3600", "int"), "task_parameters"]
+                            "max_load_rows", ("continue_run", "True", "bool"), ("timeout", "3600", "int"), 
+                            "notebook_path", ("notebook_timeout", "-1", "int"), "task_parameters"]
         params = self.__init_params(parameter_list)
         params["job_params"] = {}
         for key, value in params.items():
@@ -90,21 +91,36 @@ class PipelineUtils:
         params = self.__init_params(parameter_list)
         params = SimpleNamespace(**params)
         return params
+    
+    def init_run_notebook_params(self):
+        parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "notebook_path", ("notebook_timeout", "-1", "int"), "task_load_info", "task_parameters"]
+        params = self.__init_params(parameter_list)
+        params = SimpleNamespace(**params)
+        return params
 
     def init_transform_params(self):
-        parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "task_parameters"]
+        parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "task_load_info", "task_parameters"]
         params = self.__init_params(parameter_list)
+        #params["task_load_info"] = self.parse_task_param(params["task_load_info"])
+        if params["task_load_info"] and isinstance(params["task_load_info"], str):
+            try:
+                params["task_load_info"] = json.loads(params["task_load_info"])
+            except Exception as e: 
+                print(e)
         params["task_parameters"] = self.parse_task_param(params["task_parameters"])
         if params["task_parameters"] and isinstance(params["task_parameters"], str):
             try:
                 params["task_parameters"] = json.loads(params["task_parameters"])
-            except Exception as e:  # 捕获解析异常
+            except Exception as e: 
                 print(e)
         params = SimpleNamespace(**params)
         return params
 
     def parse_task_param(self, task_params):
         return self.pipeline_service.parse_task_param(task_params)
+
+    def get_task_values(self):
+        return self.pipeline_service.get_task_values()
 
     def sql_params(self, params):
         for key, value in params.items():

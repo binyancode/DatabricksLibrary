@@ -196,7 +196,7 @@ class PipelineService:
 
     def _init_job_task(self):
         if "currentRunId" in self.context:
-            task_run_id = self.context["currentRunId"]
+            task_run_id = self.context["rootRunId"]
             if task_run_id != "" and task_run_id is not None:
                 run = self.workspace.jobs.get_run(task_run_id)
                 try:
@@ -214,6 +214,33 @@ class PipelineService:
                 self.job = None
                 self.task = None
 
+    def _get_all_dependent_tasks(self, tasks: dict, task: Task, seen=None):
+        if seen is None:
+            seen = set()
+        dependent_tasks = []
+        for depend_on in task.depends_on:
+            if depend_on.task_key not in seen:
+                seen.add(depend_on.task_key)
+                dependent_tasks.append(depend_on.task_key)
+                # 递归调用以获取间接依赖的任务
+                depend_on_task = tasks[depend_on.task_key]
+                dependent_tasks.extend(self._get_all_dependent_tasks(tasks, depend_on_task, seen))
+        return dependent_tasks
+
+    def get_task_values(self):
+        task_load_info = {}
+        if self.job is not None and self.task is not None:
+            tasks = {task.task_key: task for task in self.job.settings.tasks}
+            depend_on_task_keys = self._get_all_dependent_tasks(tasks, self.task)
+            for task_key in depend_on_task_keys:
+                tasks = [task for task in self.job.settings.tasks if task.task_key == task_key]
+                for task in tasks:
+                    load_info_value = self.databricks_dbutils.jobs.taskValues.get(taskKey = task.task_key, key = "task_load_info", default = "")
+                    if load_info_value:
+                        load_info = json.loads(load_info_value)
+                        task_load_info[task_key] = (load_info)
+        return task_load_info
+    
     def parse_task_param(self, param):
         if param is None:
             return param
@@ -1050,13 +1077,14 @@ process_functions["{field.name}"] = process_{field.name}
             self.databricks_dbutils.jobs.taskValues.set(key = key, value = json.dumps(_value))
 
 
+
+
     def get_load_info(self, schema = None, debug = None, transform = None):
         #context = self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+        
 
         all_load_info = {}
         if self.job is not None and self.task is not None:
-            depend_on_task_keys = [depend_on.task_key for depend_on in self.task.depends_on]
-
             load_info_schema = StructType([
                 StructField("table", StringType(), True),
                 StructField("view", StringType(), True),
@@ -1065,50 +1093,51 @@ process_functions["{field.name}"] = process_{field.name}
             df_load_info = self.spark_session.createDataFrame([], load_info_schema)
             df_load_info.createOrReplaceTempView('load_info')
 
-            for task_key in depend_on_task_keys:
-                tasks = [task for task in self.job.settings.tasks if task.task_key == task_key]
-                for task in tasks:
-                    load_info_value = self.databricks_dbutils.jobs.taskValues.get(taskKey = task.task_key, key = "task_load_info", default = "")
-                    print(load_info_value)
-                    if load_info_value:
-                        load_info = json.loads(load_info_value)
-                        df_load_info = df_load_info.union(self.spark_session.createDataFrame([(load_info["table"], load_info["view"], load_info["load_id"])], load_info_schema))
-                        df_load_info.createOrReplaceTempView('load_info')
+            if self.task_load_info:
+                task_load_info = self.task_load_info
+            else:
+                task_load_info = self.get_task_values()
+            for task_key, load_info_value in task_load_info.items():
+                print(load_info_value)
+                if load_info_value:
+                    load_info = load_info_value
+                    df_load_info = df_load_info.union(self.spark_session.createDataFrame([(load_info["table"], load_info["view"], load_info["load_id"])], load_info_schema))
+                    df_load_info.createOrReplaceTempView('load_info')
 
-                        query = f"""
-                            SELECT * 
-                            FROM {load_info["table"]} 
-                            WHERE _load_id = '{load_info["load_id"]}' 
-                            and _validations.is_valid = TRUE
-                            """
-                        catalog = ""
-                        db = ""
-                        table = ""
-                        for part in reversed(load_info["table"].split('.')):
-                            if not table:
-                                    table = part
-                            elif not db:
-                                db = part
-                            else:
-                                catalog = part
+                    query = f"""
+                        SELECT * 
+                        FROM {load_info["table"]} 
+                        WHERE _load_id = '{load_info["load_id"]}' 
+                        and _validations.is_valid = TRUE
+                        """
+                    catalog = ""
+                    db = ""
+                    table = ""
+                    for part in reversed(load_info["table"].split('.')):
+                        if not table:
+                                table = part
+                        elif not db:
+                            db = part
+                        else:
+                            catalog = part
 
-                        temp_view = f"{catalog}_{db}_{table}"
-                        if load_info["view"]:
-                            temp_view = eval(f'f"{load_info["view"]}"')
-                        temp_df = self.spark_session.sql(query)
-                        if transform is not None and temp_view in transform:
-                            transform_func = transform[temp_view]
-                            if transform_func is not None and callable(transform_func) and len(inspect.signature(transform_func).parameters) == 1:
-                                temp_df = transform_func(temp_df)
-                        temp_df.createOrReplaceTempView(temp_view)
-                        #load_info["data"] = temp_df
-                        all_load_info[f"{temp_view}_info"] = SimpleNamespace(**load_info)
-                        all_load_info[temp_view] = temp_df 
+                    temp_view = f"{catalog}_{db}_{table}"
+                    if load_info["view"]:
+                        temp_view = eval(f'f"{load_info["view"]}"')
+                    temp_df = self.spark_session.sql(query)
+                    if transform is not None and temp_view in transform:
+                        transform_func = transform[temp_view]
+                        if transform_func is not None and callable(transform_func) and len(inspect.signature(transform_func).parameters) == 1:
+                            temp_df = transform_func(temp_df)
+                    temp_df.createOrReplaceTempView(temp_view)
+                    #load_info["data"] = temp_df
+                    all_load_info[f"{temp_view}_info"] = SimpleNamespace(**load_info)
+                    all_load_info[temp_view] = temp_df 
 
-                        #exec(f'{load_info["table"]}_load_id = "{load_info["load_id"]}"')
-                        #spark.createDataFrame([(load_info["table"], load_info["load_id"])], ("table", "load_id")).createOrReplaceTempView('load_info')
-                        print(f'{load_info["table"]}_load_id')
-                        print(f'{task.task_key}, {load_info["table"]}, {load_info["load_id"]}')
+                    #exec(f'{load_info["table"]}_load_id = "{load_info["load_id"]}"')
+                    #spark.createDataFrame([(load_info["table"], load_info["load_id"])], ("table", "load_id")).createOrReplaceTempView('load_info')
+                    print(f'{load_info["table"]}_load_id')
+                    print(f'{task_key}, {load_info["table"]}, {load_info["load_id"]}')
 
             for table in [table for table in self.spark_session.catalog.listTables() if table.tableType == "TEMPORARY"]:
                 print(f"{table.name} {table.tableType}")
@@ -1327,12 +1356,12 @@ process_functions["{field.name}"] = process_{field.name}
         self.last_load = SimpleNamespace(**self.last_load)
         print(self.last_load)
 
-    def __init__(self, pipeline_run_id, default_catalog = None, pipeline_name = None, spark = None):
+    def __init__(self, pipeline_run_id, default_catalog = None, pipeline_name = None, task_load_info = None, spark = None):
         super().__init__(spark)
 
         self.pipeline_run_id = pipeline_run_id
         self.pipeline_name = pipeline_name
-
+        self.task_load_info = task_load_info
         self.logs = self.__init_logs(self.job, self.task)
 
         print(self.context)
