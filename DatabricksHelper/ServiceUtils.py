@@ -95,6 +95,11 @@ class PipelineUtils:
         parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "task_parameters"]
         params = self.__init_params(parameter_list)
         params["task_parameters"] = self.parse_task_param(params["task_parameters"])
+        if params["task_parameters"] and isinstance(params["task_parameters"], str):
+            try:
+                params["task_parameters"] = json.loads(params["task_parameters"])
+            except Exception as e:  # 捕获解析异常
+                print(e)
         params = SimpleNamespace(**params)
         return params
 

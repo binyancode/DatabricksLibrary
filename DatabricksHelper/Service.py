@@ -38,17 +38,16 @@ else:
 from pyspark.sql.functions import explode, col, lit, count, max, from_json, udf, struct
 from pyspark.sql.types import *
 from pyspark.sql import DataFrame, Observation, SparkSession
-from typing import Callable
 from pyspark.sql.streaming import StreamingQueryListener, StreamingQuery
 from pyspark.sql.streaming.listener import QueryProgressEvent, StreamingQueryProgress
 from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 from urllib.parse import unquote
 from enum import IntFlag
-from types import SimpleNamespace
-from types import MethodType
-from typing import Callable, Optional, Tuple
+from types import SimpleNamespace, MethodType
+from typing import Callable, Optional, Tuple, Union
 from abc import ABC, abstractmethod
+from delta.tables import *
 import sys
 import uuid
 import json
@@ -177,7 +176,7 @@ class PipelineService:
                 #print("object:", key, val)
                 result[key] = self._copy_object(val, seen)
         return result
-    
+
     def _init_databricks(self):
         if self.spark_session is None:
             import IPython
@@ -438,9 +437,9 @@ class PipelineCluster(PipelineService):
     def _get_job_id(self, job_name:str) -> int:
         if job_name in self.jobs:
             return self.jobs[job_name]
-        for job in self.workspace.jobs.list():
-            if job_name == job.settings.name:
-                return job.job_id
+        # for job in self.workspace.jobs.list():
+        #     if job_name == job.settings.name:
+        #         return job.job_id
         return -1
     
     # def max_dop_tasks(self, tasks) -> int:
@@ -632,6 +631,8 @@ class PipelineCluster(PipelineService):
         self._init_cluster()
         self.jobs = {}
         for job in self.workspace.jobs.list():
+            if job.settings.name in self.jobs:
+                raise Exception(f"Duplicate job name: {job.settings.name}")
             self.jobs[job.settings.name] = job.job_id
 
 class Pipeline(PipelineCluster):
@@ -1058,6 +1059,7 @@ process_functions["{field.name}"] = process_{field.name}
 
             load_info_schema = StructType([
                 StructField("table", StringType(), True),
+                StructField("view", StringType(), True),
                 StructField("load_id", StringType(), True)
             ])
             df_load_info = self.spark_session.createDataFrame([], load_info_schema)
@@ -1070,7 +1072,7 @@ process_functions["{field.name}"] = process_{field.name}
                     print(load_info_value)
                     if load_info_value:
                         load_info = json.loads(load_info_value)
-                        df_load_info = df_load_info.union(self.spark_session.createDataFrame([(load_info["table"], load_info["load_id"])], load_info_schema))
+                        df_load_info = df_load_info.union(self.spark_session.createDataFrame([(load_info["table"], load_info["view"], load_info["load_id"])], load_info_schema))
                         df_load_info.createOrReplaceTempView('load_info')
 
                         query = f"""
@@ -1149,19 +1151,89 @@ process_functions["{field.name}"] = process_{field.name}
     def set_default_catalog(self, catalog):
         self.spark_session.catalog.setCurrentCatalog(catalog)
 
-    def finish_load(self, table, state = 'SUCCESS'):
-        self.spark_session.sql(f"""
-                               CREATE TABLE IF NOT EXISTS {table} (
-                                    table_name STRING,
-                                    load_id STRING,
-                                    load_state STRING,
-                                    load_time TIMESTAMP
-                                )
-                               INSERT INTO {table}
-                                SELECT `table`, load_id, '{state}', current_timestamp()
-                                FROM load_info
-                               """).collect()
-        pass
+    def merge_table(self, table_aliases, target_table: str, source_table: Union[str, DataFrame], keys, source_script = None, schema = "workflow", insert_columns = None, update_columns = None, state = 'succeeded'):
+        if source_table and isinstance(source_table, str):
+            source = self.spark_session.table(source_table)
+        elif source_table and isinstance(source_table, DataFrame):
+            source = source_table
+        elif source_script:
+            source = self.spark_session.sql(source_script)
+        #keys = {"BusinessPartnerGUID": "BusinessPartnerGUID"} #source:target
+
+        if not insert_columns:
+            insert_columns = source.columns
+
+        if not update_columns:
+            update_columns = source.columns
+        try:
+            self.spark_session.sql(f"SELECT 1 FROM {target_table} LIMIT 1").collect()
+        except Exception as ex:
+            self.spark_session.sql(f"create table {target_table} as select * from {source_table} where 1=0").collect()
+
+        target = DeltaTable.forName(sparkSession=self.spark_session, tableOrViewName= target_table)
+        start_time = time.time()
+        merge_result = target.alias('target').merge(
+            source.alias('source'),
+            " and ".join([f"target.{k} = source.{k}" for k in keys])
+        ) \
+        .whenMatchedUpdate(set = {k: f"source.{k}" for k in update_columns}
+        ) \
+        .whenNotMatchedInsert(values = {k: f"source.{k}" for k in insert_columns}
+        ) \
+        .execute()
+        end_time = time.time()
+        merge_result = merge_result.first()
+        print(merge_result)
+        for table in [table for table in self.spark_session.catalog.listTables() if table.isTemporary and table.name=='load_info']:
+            load_info_catalog = f"{self.default_catalog}." if self.default_catalog else ""
+            load_info_table = f"{load_info_catalog}{schema}.load_info"
+            self.spark_session.sql(f"""
+                                CREATE TABLE IF NOT EXISTS {load_info_table} (
+                                        merge_id STRING,
+                                        pipeline_run_id STRING,
+                                        pipeline_name STRING,
+                                        notebook STRING,
+                                        job_name STRING,
+                                        task_name STRING,
+                                        `catalog` STRING,
+                                        table_name STRING,
+                                        num_affected_rows INT,
+                                        num_updated_rows INT,
+                                        num_deleted_rows INT,
+                                        num_inserted_rows INT,
+                                        merge_duration DOUBLE,
+                                        `table` STRING,
+                                        `view` STRING,
+                                        load_id STRING,
+                                        load_state STRING,
+                                        load_time TIMESTAMP
+                                    ) CLUSTER BY (task_name, merge_id);
+                                """).collect()
+            self.spark_session.sql(f"""
+                                INSERT INTO {load_info_table}
+                                    SELECT 
+                                        '{str(uuid.uuid4())}', 
+                                        '{self.pipeline_run_id}', 
+                                        '{self.pipeline_name}', 
+                                        '{self.context["notebook_path"]}', 
+                                        '{self.job.settings.name}', 
+                                        '{self.task.task_key}', 
+                                        '{self.spark_session.catalog.currentCatalog()}', 
+                                        '{target_table}', 
+                                        {merge_result["num_affected_rows"]},
+                                        {merge_result["num_updated_rows"]},
+                                        {merge_result["num_deleted_rows"]},
+                                        {merge_result["num_inserted_rows"]},
+                                        {end_time - start_time},
+                                        `table`, 
+                                        `view`, 
+                                        `load_id`, 
+                                        '{state}', 
+                                        current_timestamp()
+                                    FROM load_info where `view` in ({", ".join([f"'{item}'" for item in table_aliases])})
+                                """).collect()
+            #[Row(num_affected_rows=10, num_updated_rows=10, num_deleted_rows=0, num_inserted_rows=0)]
+
 
     def clear_table(self, table_names, earlist_time):
         self.logs.log('operations', { "operation": f'clear table:{table_names} older than {earlist_time}' }, True)
