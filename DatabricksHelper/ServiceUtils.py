@@ -116,12 +116,24 @@ class PipelineUtils:
         params = SimpleNamespace(**params)
         return params
 
+    def init_common_params(self, parameter_list = None):
+        if parameter_list:
+            parameter_list = parameter_list + ["pipeline_run_id", "pipeline_name", "default_catalog", "task_parameters"]
+        else:
+            parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "task_parameters"]
+        params = self.__init_params(parameter_list)
+        params = SimpleNamespace(**params)
+        return params
+
     def parse_task_param(self, task_params):
         return self.pipeline_service.parse_task_param(task_params)
 
     def get_task_values(self):
         return self.pipeline_service.get_task_values()
 
+    def run_notebook(self, notebook_path, globals = None, locals = None):
+        return self.pipeline_service.run_notebook(notebook_path, globals, locals)
+    
     def sql_params(self, params):
         for key, value in params.items():
             self.sql_param(key, value)

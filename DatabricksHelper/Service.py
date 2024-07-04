@@ -241,6 +241,19 @@ class PipelineService:
                         task_load_info[task_key] = (load_info)
         return task_load_info
     
+    def run_notebook(self, notebook_path, globals = None, locals = None):
+        export:ExportResponse = self.workspace.workspace.export(notebook_path, format=ExportFormat.SOURCE)
+        decoded_bytes = base64.b64decode(export.content)
+        decoded_string = decoded_bytes.decode("utf-8")
+        if globals and locals:
+            exec(decoded_string, globals, locals)
+        elif globals:
+            exec(decoded_string, globals = globals)
+        elif locals:
+            exec(decoded_string, locals = locals)
+        else:
+            exec(decoded_string)
+
     def parse_task_param(self, param):
         if param is None:
             return param
@@ -823,14 +836,17 @@ class Pipeline(PipelineCluster):
         #         # globals_dict['TableLoadingValidation'] = TableLoadingValidation
         #         exec(file.read())
         #         print(f"Streaming processor file loaded")
-        
         try:
-            export:ExportResponse = self.workspace.workspace.export(path, format=ExportFormat.SOURCE)
-            decoded_bytes = base64.b64decode(export.content)
-            decoded_string = decoded_bytes.decode("utf-8")
-            exec(decoded_string)
+            self.run_notebook(path)
         except Exception as ex:
             print(f"Cannot load streaming processor file: {ex}")
+        # try:
+        #     export:ExportResponse = self.workspace.workspace.export(path, format=ExportFormat.SOURCE)
+        #     decoded_bytes = base64.b64decode(export.content)
+        #     decoded_string = decoded_bytes.decode("utf-8")
+        #     exec(decoded_string)
+        # except Exception as ex:
+        #     print(f"Cannot load streaming processor file: {ex}")
 
         locals_after = dict(locals())
         new_locals = {k: v for k, v in locals_after.items() if k not in locals_before}
