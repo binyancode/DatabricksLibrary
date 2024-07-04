@@ -689,11 +689,25 @@ class Pipeline(PipelineCluster):
         except TimeoutError as ex:
             self.workspace.jobs.cancel_run_and_wait(response["run_id"])
             raise ex
+        except Exception as ex:
+            raise ex
+        finally:
+            run_result = None
+            if 'run' in locals():
+                run_result = run
+            elif "run_id" in response:
+                run_result =self.workspace.jobs.get_run(response["run_id"])    
+            if run_result:
+                run_result = run_result.as_dict()
+                print("job:", run_result["run_name"], run_result["state"]["result_state"], run_result["run_page_url"])
+                for task in run_result["tasks"]:
+                    print("task:", task["task_key"], task["state"]["result_state"], task["run_page_url"])
+            else:
+                print("run_result is None:", response)
         print(f"Run job {run.run_name} {run.state.result_state}")
         result_dict = run.as_dict()
         self.logs.log("job_run_results", result_dict)
         self.logs.flush_log()
-        print(f"{json.dumps(result_dict)}\n")
         return result_dict
 
     def run(self, job_name:str, params = None, continue_run = True, timeout = 3600):

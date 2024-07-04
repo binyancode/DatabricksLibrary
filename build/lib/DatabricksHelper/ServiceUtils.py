@@ -79,7 +79,7 @@ class PipelineUtils:
         params = self.__init_params(parameter_list)
         params["job_params"] = {}
         for key, value in params.items():
-            if key != "job_params" and value is not None and value != "":
+            if key != "job_params" and value is not None and value != "" and (not isinstance(value, str) or value.strip("{}").strip(" ") != ""):
                 params["job_params"][key] = value
         params = SimpleNamespace(**params)
         return params
