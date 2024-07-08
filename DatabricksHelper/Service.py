@@ -67,6 +67,10 @@ class Reload(IntFlag):
     DROP_TABLE = 4
     TRUNCATE_TABLE = 8
 
+class MergeMode(IntFlag):
+    MergeInto = 0
+    InsertOverwrite = 1
+
 class DataReader:
     def __init__(self, data, load_id):
         self.data = data
@@ -752,12 +756,6 @@ class Pipeline(PipelineCluster):
         print(f"Running the job {job_name}.")
         return (self.__running(wait_run, timeout), self.__check_continue(job_name))
 
-    def run_notebook(self, params):
-        notebook_path = self.parse_task_param(params.notebook_path)
-        notebook_timeout = self.parse_task_param(params.notebook_timeout)
-        params.task_load_info = json.dumps(self.get_task_values())
-        self.databricks_dbutils.notebook.run(notebook_path, notebook_timeout, arguments=vars(params))
-
     def __read_data(self, source_file, file_format, schema_dir, reader_options = None):
         if not self.last_load.load_info or self.last_load.load_info["status"] == "succeeded":
             load_id = str(uuid.uuid4())
@@ -1210,7 +1208,7 @@ process_functions["{field.name}"] = process_{field.name}
     def set_default_catalog(self, catalog):
         self.spark_session.catalog.setCurrentCatalog(catalog)
 
-    def merge_table(self, table_aliases, target_table: str, source_table: Union[str, DataFrame], keys, source_script = None, schema = "workflow", insert_columns = None, update_columns = None, state = 'succeeded'):
+    def merge_table(self, table_aliases, target_table: str, source_table: Union[str, DataFrame], keys, mode: MergeMode, source_script = None, schema = "workflow", insert_columns = None, update_columns = None, state = 'succeeded'):
         if source_table and isinstance(source_table, str):
             source = self.spark_session.table(source_table)
         elif source_table and isinstance(source_table, DataFrame):
@@ -1223,74 +1221,104 @@ process_functions["{field.name}"] = process_{field.name}
             insert_columns = source.columns
 
         if not update_columns:
-            update_columns = source.columns
-        try:
-            self.spark_session.sql(f"SELECT 1 FROM {target_table} LIMIT 1").collect()
-        except Exception as ex:
-            self.spark_session.sql(f"create table {target_table} as select * from {source_table} where 1=0").collect()
-
-        target = DeltaTable.forName(sparkSession=self.spark_session, tableOrViewName= target_table)
+            update_columns = source.columns 
         start_time = time.time()
-        merge_result = target.alias('target').merge(
-            source.alias('source'),
-            " and ".join([f"target.{k} = source.{k}" for k in keys])
-        ) \
-        .whenMatchedUpdate(set = {k: f"source.{k}" for k in update_columns}
-        ) \
-        .whenNotMatchedInsert(values = {k: f"source.{k}" for k in insert_columns}
-        ) \
-        .execute()
+
+        if mode == MergeMode.MergeInto:
+
+            try:
+                self.spark_session.sql(f"SELECT 1 FROM {target_table} LIMIT 1").collect()
+            except Exception as ex:
+                self.spark_session.sql(f"create table {target_table} as select * from {source_table} where 1=0").collect()
+
+            target = DeltaTable.forName(sparkSession=self.spark_session, tableOrViewName= target_table)
+            
+            merge_result = target.alias('target').merge(
+                source.alias('source'),
+                " and ".join([f"target.{k} = source.{k}" for k in keys])
+            ) \
+            .whenMatchedUpdate(set = {k: f"source.{k}" for k in update_columns}
+            ) \
+            .whenNotMatchedInsert(values = {k: f"source.{k}" for k in insert_columns}
+            ) \
+            .execute()
+            merge_result = merge_result.first()
+            
+        elif mode == MergeMode.InsertOverwrite:
+            temp_source_table = str(uuid.uuid4()).replace('-', '')
+            source.createOrReplaceTempView(temp_source_table)
+            self.spark_session.sql(f"""
+                CREATE OR REPLACE TEMP VIEW temp_target_{temp_source_table} AS
+                SELECT t1.*
+                FROM {target_table} t1
+                LEFT ANTI JOIN (select distinct {", ".join(keys)} 
+                from {temp_source_table}) t2 
+                ON {" and ".join([f"t1.{column_name} = t2.{column_name}" for column_name in keys])}
+                union all
+                SELECT t2.*
+                FROM {temp_source_table} t2
+                JOIN (select distinct {", ".join(keys)} 
+                from {target_table}) t1 
+                ON {" and ".join([f"t1.{column_name} = t2.{column_name}" for column_name in keys])}
+                """).collect()
+            merge_result = self.spark_session.sql(f"INSERT OVERWRITE TABLE {target_table} select * from temp_target_{temp_source_table}").collect()
+            merge_result = merge_result[0]
+        
         end_time = time.time()
-        merge_result = merge_result.first()
         print(merge_result)
-        for table in [table for table in self.spark_session.catalog.listTables() if table.isTemporary and table.name=='load_info']:
-            load_info_catalog = f"{self.default_catalog}." if self.default_catalog else ""
-            load_info_table = f"{load_info_catalog}{schema}.load_info"
-            self.spark_session.sql(f"""
-                                CREATE TABLE IF NOT EXISTS {load_info_table} (
-                                        merge_id STRING,
-                                        pipeline_run_id STRING,
-                                        pipeline_name STRING,
-                                        notebook STRING,
-                                        job_name STRING,
-                                        task_name STRING,
-                                        `catalog` STRING,
-                                        table_name STRING,
-                                        num_affected_rows INT,
-                                        num_updated_rows INT,
-                                        num_deleted_rows INT,
-                                        num_inserted_rows INT,
-                                        merge_duration DOUBLE,
-                                        `table` STRING,
-                                        `view` STRING,
-                                        load_id STRING,
-                                        load_state STRING,
-                                        load_time TIMESTAMP
-                                    ) CLUSTER BY (task_name, merge_id);
-                                """).collect()
-            self.spark_session.sql(f"""
-                                INSERT INTO {load_info_table}
-                                    SELECT 
-                                        '{str(uuid.uuid4())}', 
-                                        '{self.pipeline_run_id}', 
-                                        '{self.pipeline_name}', 
-                                        '{self.context["notebook_path"]}', 
-                                        '{self.job.settings.name}', 
-                                        '{self.task.task_key}', 
-                                        '{self.spark_session.catalog.currentCatalog()}', 
-                                        '{target_table}', 
-                                        {merge_result["num_affected_rows"]},
-                                        {merge_result["num_updated_rows"]},
-                                        {merge_result["num_deleted_rows"]},
-                                        {merge_result["num_inserted_rows"]},
-                                        {end_time - start_time},
-                                        `table`, 
-                                        `view`, 
-                                        `load_id`, 
-                                        '{state}', 
-                                        current_timestamp()
-                                    FROM load_info where `view` in ({", ".join([f"'{item}'" for item in table_aliases])})
-                                """).collect()
+        #for table in [table for table in self.spark_session.catalog.listTables() if table.isTemporary and table.name=='load_info']:
+        load_info_json = []
+        if any(table.name == "load_info" for table in self.spark_session.catalog.listTables()):
+            df_load_info = self.spark_session.table("load_info")
+            load_info_rows = df_load_info.filter(df_load_info['view'].isin(table_aliases)).collect()
+            load_info_json = [row.asDict() for row in load_info_rows]
+
+        load_info_catalog = f"{self.default_catalog}." if self.default_catalog else ""
+        load_info_table = f"{load_info_catalog}{schema}.table_load_info"
+        self.spark_session.sql(f"""
+                            CREATE TABLE IF NOT EXISTS {load_info_table} (
+                                    merge_id STRING,
+                                    merge_mode STRING,
+                                    pipeline_run_id STRING,
+                                    pipeline_name STRING,
+                                    notebook STRING,
+                                    job_name STRING,
+                                    task_name STRING,
+                                    `catalog` STRING,
+                                    table_name STRING,
+                                    num_affected_rows INT,
+                                    num_updated_rows INT,
+                                    num_deleted_rows INT,
+                                    num_inserted_rows INT,
+                                    merge_duration DOUBLE,
+                                    referenced_tables STRING,
+                                    load_info STRING,
+                                    load_state STRING,
+                                    load_time TIMESTAMP
+                                ) CLUSTER BY (task_name, merge_id);
+                            """).collect()
+        self.spark_session.sql(f"""
+                            INSERT INTO {load_info_table}
+                                SELECT 
+                                    '{str(uuid.uuid4())}',
+                                    '{mode.name}', 
+                                    '{self.pipeline_run_id}', 
+                                    '{self.pipeline_name}', 
+                                    '{self.context["notebook_path"]}', 
+                                    {"'" + self.job.settings.name + "'" if self.job else "null"}, 
+                                    {"'" + self.task.task_key + "'" if self.task else "null"}, 
+                                    '{self.spark_session.catalog.currentCatalog()}', 
+                                    '{target_table}', 
+                                    {merge_result["num_affected_rows"] if "num_affected_rows" in merge_result else "null"},
+                                    {merge_result["num_updated_rows"] if "num_updated_rows" in merge_result else "null"},
+                                    {merge_result["num_deleted_rows"] if "num_deleted_rows" in merge_result else "null"},
+                                    {merge_result["num_inserted_rows"] if "num_inserted_rows" in merge_result else "null"},
+                                    {end_time - start_time},
+                                    '{json.dumps(table_aliases, ensure_ascii=False).replace("'", "''")}',
+                                    '{json.dumps(load_info_json, ensure_ascii=False).replace("'", "''")}', 
+                                    '{state}', 
+                                    current_timestamp()
+                            """).collect()
             #[Row(num_affected_rows=10, num_updated_rows=10, num_deleted_rows=0, num_inserted_rows=0)]
 
 
@@ -1404,7 +1432,7 @@ process_functions["{field.name}"] = process_{field.name}
             self.set_default_catalog(self.default_catalog)
 
 
-__all__ = ['Pipeline', 'Reload']
+__all__ = ['Pipeline', 'Reload', 'MergeMode']
 # if 'streaming_listeners' not in globals():
 #   print("not")
 #   streaming_listeners = []

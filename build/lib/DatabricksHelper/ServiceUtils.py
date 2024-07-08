@@ -142,7 +142,14 @@ class PipelineUtils:
 
     def get_notebook(self, notebook_path):
         return self.pipeline_service.get_notebook(notebook_path)
-    
+
+    def run_notebook(self):
+        params = self.init_run_notebook_params()
+        notebook_path = self.parse_task_param(params.notebook_path)
+        notebook_timeout = self.parse_task_param(params.notebook_timeout)
+        params.task_load_info = json.dumps(self.get_task_values())
+        self.pipeline_service.databricks_dbutils.notebook.run(notebook_path, notebook_timeout, arguments=vars(params))
+
     def sql_params(self, params):
         for key, value in params.items():
             self.sql_param(key, value)
