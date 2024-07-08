@@ -241,6 +241,12 @@ class PipelineService:
                         task_load_info[task_key] = (load_info)
         return task_load_info
     
+    def get_notebook(self, notebook_path:str):
+        export:ExportResponse = self.workspace.workspace.export(notebook_path, format=ExportFormat.SOURCE)
+        decoded_bytes = base64.b64decode(export.content)
+        decoded_string = decoded_bytes.decode("utf-8")
+        return decoded_string
+
     def parse_task_param(self, param):
         if param is None:
             return param
@@ -746,6 +752,12 @@ class Pipeline(PipelineCluster):
         print(f"Running the job {job_name}.")
         return (self.__running(wait_run, timeout), self.__check_continue(job_name))
 
+    def run_notebook(self, params):
+        notebook_path = self.parse_task_param(params.notebook_path)
+        notebook_timeout = self.parse_task_param(params.notebook_timeout)
+        params.task_load_info = json.dumps(self.get_task_values())
+        self.databricks_dbutils.notebook.run(notebook_path, notebook_timeout, arguments=vars(params))
+
     def __read_data(self, source_file, file_format, schema_dir, reader_options = None):
         if not self.last_load.load_info or self.last_load.load_info["status"] == "succeeded":
             load_id = str(uuid.uuid4())
@@ -823,12 +835,15 @@ class Pipeline(PipelineCluster):
         #         # globals_dict['TableLoadingValidation'] = TableLoadingValidation
         #         exec(file.read())
         #         print(f"Streaming processor file loaded")
-        
+        # try:
+        #     self.run_notebook(path)
+        # except Exception as ex:
+        #     print(f"Cannot load streaming processor file: {ex}")
         try:
-            export:ExportResponse = self.workspace.workspace.export(path, format=ExportFormat.SOURCE)
-            decoded_bytes = base64.b64decode(export.content)
-            decoded_string = decoded_bytes.decode("utf-8")
-            exec(decoded_string)
+            # export:ExportResponse = self.workspace.workspace.export(path, format=ExportFormat.SOURCE)
+            # decoded_bytes = base64.b64decode(export.content)
+            # decoded_string = decoded_bytes.decode("utf-8")
+            exec(self.get_notebook(path))
         except Exception as ex:
             print(f"Cannot load streaming processor file: {ex}")
 
@@ -884,23 +899,24 @@ class Pipeline(PipelineCluster):
             return {"is_valid": is_valid, "validation_result": validation_result, "validations": validations}
 
         df = df.withColumn("_validations", process_validations(struct([df[col] for col in df.columns])))
-                
-        process_functions = {}
-        ignore_columns = ["_rescued_data", "_source_metadata", "_load_id", "_load_time", "_validations"]
-        for field in [field for field in df.schema.fields if field.name in streaming_processor_obj.with_columns() and field.name not in ignore_columns]:
-            print(f"{field.name}")
-            func_script = f"""
+        
+        if streaming_processor_obj:
+            process_functions = {}
+            ignore_columns = ["_rescued_data", "_source_metadata", "_load_id", "_load_time", "_validations"]
+            for field in [field for field in df.schema.fields if field.name in streaming_processor_obj.with_columns() and field.name not in ignore_columns]:
+                print(f"{field.name}")
+                func_script = f"""
 @udf({field.dataType})
 def process_{field.name}(row, column_name, validations):
     return streaming_processor_obj.process_cell(row, column_name, validations)
 
 process_functions["{field.name}"] = process_{field.name}
-"""
-            globals_dict = globals()
-            globals_dict["streaming_processor_obj"] = streaming_processor_obj
-            globals_dict["process_functions"] = process_functions
-            exec(func_script, globals_dict)
-            df = df.withColumn(field.name, process_functions[field.name](struct([df[col] for col in df.columns]), lit(field.name), df["_validations"]))
+    """
+                globals_dict = globals()
+                globals_dict["streaming_processor_obj"] = streaming_processor_obj
+                globals_dict["process_functions"] = process_functions
+                exec(func_script, globals_dict)
+                df = df.withColumn(field.name, process_functions[field.name](struct([df[col] for col in df.columns]), lit(field.name), df["_validations"]))
 
         return df
 

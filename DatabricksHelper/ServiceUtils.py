@@ -72,56 +72,65 @@ class PipelineUtils:
     
     
     def init_run_params(self):
-        parameter_list = ["pipeline_run_id", "pipeline_name", "job_name", "default_catalog", "target_table", \
-                          "source_file", "file_format", "table_alias", "reader_options", "reload_table", \
-                            "max_load_rows", ("continue_run", "True", "bool"), ("timeout", "3600", "int"), 
-                            "notebook_path", ("notebook_timeout", "-1", "int"), "task_parameters"]
-        params = self.__init_params(parameter_list)
+        params = self.init_common_params(["job_name", "target_table", "source_file", "file_format", "table_alias", \
+                                          "reader_options", "reload_table", "max_load_rows", ("continue_run", "True", "bool"), \
+                                            ("timeout", "3600", "int"), "notebook_path", ("notebook_timeout", "-1", "int")], False)
+        # parameter_list = ["pipeline_run_id", "pipeline_name", "job_name", "default_catalog", "target_table", \
+        #                   "source_file", "file_format", "table_alias", "reader_options", "reload_table", \
+        #                     "max_load_rows", ("continue_run", "True", "bool"), ("timeout", "3600", "int"), 
+        #                     "notebook_path", ("notebook_timeout", "-1", "int"), "task_parameters"]
+        # params = self.__init_params(parameter_list)
+        
+        params = vars(params)
         params["job_params"] = {}
         for key, value in params.items():
             if key != "job_params" and value is not None and value != "" and (not isinstance(value, str) or value.strip("{}").strip(" ") != ""):
-                params["job_params"][key] = value
+                params["job_params"][key] = str(value) if isinstance(value, (int, float, str, bool)) else json.dumps(value)
         params = SimpleNamespace(**params)
         return params
 
     def init_load_params(self):
-        parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "target_table", \
-                          "source_file", "file_format", "table_alias", ("reader_options","{}","json.loads"), \
-                            ("reload_table", "Reload.DEFAULT"), ("max_load_rows", "-1", "int"), "validation", "task_parameters"]
-        params = self.__init_params(parameter_list)
-        params = SimpleNamespace(**params)
+        params = self.init_common_params(["target_table","source_file", "file_format", "table_alias", \
+                                          ("reader_options","{}","json.loads"), ("reload_table", "Reload.DEFAULT"), \
+                                            ("max_load_rows", "-1", "int"), "validation"], False)
+        # parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "target_table", \
+        #                   "source_file", "file_format", "table_alias", ("reader_options","{}","json.loads"), \
+        #                     ("reload_table", "Reload.DEFAULT"), ("max_load_rows", "-1", "int"), "validation", "task_parameters"]
+        # params = self.__init_params(parameter_list)
+        # params = SimpleNamespace(**params)
         return params
     
     def init_run_notebook_params(self):
-        parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "notebook_path", ("notebook_timeout", "-1", "int"), "task_load_info", "task_parameters"]
-        params = self.__init_params(parameter_list)
-        params = SimpleNamespace(**params)
+        params = self.init_common_params(["notebook_path", ("notebook_timeout", "-1", "int"), "task_load_info"], False)
+        #parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "notebook_path", ("notebook_timeout", "-1", "int"), "task_load_info", "task_parameters"]
+        #params = self.__init_params(parameter_list)
+        #params = SimpleNamespace(**params)
         return params
 
     def init_transform_params(self):
-        parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "task_load_info", "task_parameters"]
-        params = self.__init_params(parameter_list)
-        #params["task_load_info"] = self.parse_task_param(params["task_load_info"])
+        params = self.init_common_params(["task_load_info"])
+        params = vars(params)
         if params["task_load_info"] and isinstance(params["task_load_info"], str):
             try:
                 params["task_load_info"] = json.loads(params["task_load_info"])
             except Exception as e: 
                 print(e)
-        params["task_parameters"] = self.parse_task_param(params["task_parameters"])
-        if params["task_parameters"] and isinstance(params["task_parameters"], str):
-            try:
-                params["task_parameters"] = json.loads(params["task_parameters"])
-            except Exception as e: 
-                print(e)
         params = SimpleNamespace(**params)
         return params
 
-    def init_common_params(self, parameter_list = None):
+    def init_common_params(self, parameter_list = None, parse_task_param = True):
         if parameter_list:
             parameter_list = parameter_list + ["pipeline_run_id", "pipeline_name", "default_catalog", "task_parameters"]
         else:
             parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "task_parameters"]
         params = self.__init_params(parameter_list)
+        if parse_task_param:
+            params["task_parameters"] = self.parse_task_param(params["task_parameters"])
+            if params["task_parameters"] and isinstance(params["task_parameters"], str):
+                try:
+                    params["task_parameters"] = json.loads(params["task_parameters"])
+                except Exception as e: 
+                    print(e)
         params = SimpleNamespace(**params)
         return params
 
@@ -131,8 +140,8 @@ class PipelineUtils:
     def get_task_values(self):
         return self.pipeline_service.get_task_values()
 
-    def run_notebook(self, notebook_path, globals = None, locals = None):
-        return self.pipeline_service.run_notebook(notebook_path, globals, locals)
+    def get_notebook(self, notebook_path):
+        return self.pipeline_service.get_notebook(notebook_path)
     
     def sql_params(self, params):
         for key, value in params.items():
