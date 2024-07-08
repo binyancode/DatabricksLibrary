@@ -1259,7 +1259,7 @@ process_functions["{field.name}"] = process_{field.name}
                 """).collect()[0]
             merge_result = Row(num_affected_rows=insert_result["num_affected_rows"] + merge_result["num_deleted_rows"], \
                                 num_inserted_rows=insert_result["num_inserted_rows"], \
-                                num_updated_rows=merge_result["num_deleted_rows"], \
+                                num_updated_rows=0, \
                                 num_deleted_rows=merge_result["num_deleted_rows"])
         elif mode == MergeMode.MergeOverwrite:
             temp_source_table = str(uuid.uuid4()).replace('-', '')
