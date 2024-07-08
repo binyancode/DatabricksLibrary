@@ -37,7 +37,7 @@ else:
 #from databricks.sdk.service.jobs import Run, Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, JobCluster, JobSettings, NotebookTask
 from pyspark.sql.functions import explode, col, lit, count, max, from_json, udf, struct
 from pyspark.sql.types import *
-from pyspark.sql import DataFrame, Observation, SparkSession
+from pyspark.sql import Row, DataFrame, Observation, SparkSession
 from pyspark.sql.streaming import StreamingQueryListener, StreamingQuery
 from pyspark.sql.streaming.listener import QueryProgressEvent, StreamingQueryProgress
 from datetime import datetime, timedelta, timezone
@@ -1224,15 +1224,13 @@ process_functions["{field.name}"] = process_{field.name}
             update_columns = source.columns 
         start_time = time.time()
 
+        try:
+            self.spark_session.sql(f"SELECT 1 FROM {target_table} LIMIT 1").collect()
+        except Exception as ex:
+            self.spark_session.sql(f"create table {target_table} as select * from {source_table} where 1=0").collect()
+
         if mode == MergeMode.MergeInto:
-
-            try:
-                self.spark_session.sql(f"SELECT 1 FROM {target_table} LIMIT 1").collect()
-            except Exception as ex:
-                self.spark_session.sql(f"create table {target_table} as select * from {source_table} where 1=0").collect()
-
             target = DeltaTable.forName(sparkSession=self.spark_session, tableOrViewName= target_table)
-            
             merge_result = target.alias('target').merge(
                 source.alias('source'),
                 " and ".join([f"target.{k} = source.{k}" for k in keys])
@@ -1245,24 +1243,41 @@ process_functions["{field.name}"] = process_{field.name}
             merge_result = merge_result.first()
             
         elif mode == MergeMode.InsertOverwrite:
-            temp_source_table = str(uuid.uuid4()).replace('-', '')
-            source.createOrReplaceTempView(temp_source_table)
-            self.spark_session.sql(f"""
-                CREATE OR REPLACE TEMP VIEW temp_target_{temp_source_table} AS
-                SELECT t1.*
-                FROM {target_table} t1
-                LEFT ANTI JOIN (select distinct {", ".join(keys)} 
-                from {temp_source_table}) t2 
-                ON {" and ".join([f"t1.{column_name} = t2.{column_name}" for column_name in keys])}
-                union all
-                SELECT t2.*
-                FROM {temp_source_table} t2
-                JOIN (select distinct {", ".join(keys)} 
-                from {target_table}) t1 
-                ON {" and ".join([f"t1.{column_name} = t2.{column_name}" for column_name in keys])}
-                """).collect()
-            merge_result = self.spark_session.sql(f"INSERT OVERWRITE TABLE {target_table} select * from temp_target_{temp_source_table}").collect()
-            merge_result = merge_result[0]
+            target = DeltaTable.forName(sparkSession=self.spark_session, tableOrViewName= target_table)
+            groupbing_source = source.groupBy(*keys)
+            merge_result = target.alias('target').merge(
+                groupbing_source.alias('groupbing_source'),
+                " and ".join([f"target.{k} = groupbing_source.{k}" for k in keys])
+            ) \
+            .whenMatchedDelete() \
+            .execute()
+            merge_result = merge_result.first()
+            source.createOrReplaceTempView("source_table")
+            insert_result = self.spark_session.sql(f"""
+                    insert into {target_table} select * from {source_table}
+                """).collect()[0]
+            merge_result = Row(num_affected_rows=insert_result["num_affected_rows"] + merge_result["num_deleted_rows"], \
+                                num_inserted_rows=insert_result["num_inserted_rows"], \
+                                num_updated_rows=merge_result["num_deleted_rows"], \
+                                num_deleted_rows=merge_result["num_deleted_rows"])
+            # temp_source_table = str(uuid.uuid4()).replace('-', '')
+            # source.createOrReplaceTempView(temp_source_table)
+            # self.spark_session.sql(f"""
+            #     CREATE OR REPLACE TEMP VIEW temp_target_{temp_source_table} AS
+            #     SELECT t1.*
+            #     FROM {target_table} t1
+            #     LEFT ANTI JOIN (select distinct {", ".join(keys)} 
+            #     from {temp_source_table}) t2 
+            #     ON {" and ".join([f"t1.{column_name} = t2.{column_name}" for column_name in keys])}
+            #     union all
+            #     SELECT t2.*
+            #     FROM {temp_source_table} t2
+            #     JOIN (select distinct {", ".join(keys)} 
+            #     from {target_table}) t1 
+            #     ON {" and ".join([f"t1.{column_name} = t2.{column_name}" for column_name in keys])}
+            #     """).collect()
+            # merge_result = self.spark_session.sql(f"INSERT OVERWRITE TABLE {target_table} select * from temp_target_{temp_source_table}").collect()
+            # merge_result = merge_result[0]
         
         end_time = time.time()
         print(merge_result)
