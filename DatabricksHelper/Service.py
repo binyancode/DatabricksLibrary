@@ -69,7 +69,8 @@ class Reload(IntFlag):
 
 class MergeMode(IntFlag):
     MergeInto = 0
-    InsertOverwrite = 1
+    DeleteAndInsert = 1
+    MergeOverwrite = 2
 
 class DataReader:
     def __init__(self, data, load_id):
@@ -1242,12 +1243,12 @@ process_functions["{field.name}"] = process_{field.name}
             .execute()
             merge_result = merge_result.first()
             
-        elif mode == MergeMode.InsertOverwrite:
+        elif mode == MergeMode.DeleteAndInsert:
             target = DeltaTable.forName(sparkSession=self.spark_session, tableOrViewName= target_table)
-            groupbing_source = source.groupBy(*keys)
+            grouping_source = source.groupBy(*keys).count()
             merge_result = target.alias('target').merge(
-                groupbing_source.alias('groupbing_source'),
-                " and ".join([f"target.{k} = groupbing_source.{k}" for k in keys])
+                grouping_source.alias('grouping_source'),
+                " and ".join([f"target.{k} = grouping_source.{k}" for k in keys])
             ) \
             .whenMatchedDelete() \
             .execute()
@@ -1260,24 +1261,25 @@ process_functions["{field.name}"] = process_{field.name}
                                 num_inserted_rows=insert_result["num_inserted_rows"], \
                                 num_updated_rows=merge_result["num_deleted_rows"], \
                                 num_deleted_rows=merge_result["num_deleted_rows"])
-            # temp_source_table = str(uuid.uuid4()).replace('-', '')
-            # source.createOrReplaceTempView(temp_source_table)
-            # self.spark_session.sql(f"""
-            #     CREATE OR REPLACE TEMP VIEW temp_target_{temp_source_table} AS
-            #     SELECT t1.*
-            #     FROM {target_table} t1
-            #     LEFT ANTI JOIN (select distinct {", ".join(keys)} 
-            #     from {temp_source_table}) t2 
-            #     ON {" and ".join([f"t1.{column_name} = t2.{column_name}" for column_name in keys])}
-            #     union all
-            #     SELECT t2.*
-            #     FROM {temp_source_table} t2
-            #     JOIN (select distinct {", ".join(keys)} 
-            #     from {target_table}) t1 
-            #     ON {" and ".join([f"t1.{column_name} = t2.{column_name}" for column_name in keys])}
-            #     """).collect()
-            # merge_result = self.spark_session.sql(f"INSERT OVERWRITE TABLE {target_table} select * from temp_target_{temp_source_table}").collect()
-            # merge_result = merge_result[0]
+        elif mode == MergeMode.MergeOverwrite:
+            temp_source_table = str(uuid.uuid4()).replace('-', '')
+            source.createOrReplaceTempView(temp_source_table)
+            self.spark_session.sql(f"""
+                CREATE OR REPLACE TEMP VIEW temp_target_{temp_source_table} AS
+                SELECT t1.*
+                FROM {target_table} t1
+                LEFT ANTI JOIN (select distinct {", ".join(keys)} 
+                from {temp_source_table}) t2 
+                ON {" and ".join([f"t1.{column_name} = t2.{column_name}" for column_name in keys])}
+                union all
+                SELECT t2.*
+                FROM {temp_source_table} t2
+                JOIN (select distinct {", ".join(keys)} 
+                from {target_table}) t1 
+                ON {" and ".join([f"t1.{column_name} = t2.{column_name}" for column_name in keys])}
+                """).collect()
+            merge_result = self.spark_session.sql(f"INSERT OVERWRITE TABLE {target_table} select * from temp_target_{temp_source_table}").collect()
+            merge_result = merge_result[0]
         
         end_time = time.time()
         print(merge_result)
@@ -1329,8 +1331,8 @@ process_functions["{field.name}"] = process_{field.name}
                                     {merge_result["num_deleted_rows"] if "num_deleted_rows" in merge_result else "null"},
                                     {merge_result["num_inserted_rows"] if "num_inserted_rows" in merge_result else "null"},
                                     {end_time - start_time},
-                                    '{json.dumps(table_aliases, ensure_ascii=False).replace("'", "''")}',
-                                    '{json.dumps(load_info_json, ensure_ascii=False).replace("'", "''")}', 
+                                    {"'" + json.dumps(table_aliases, ensure_ascii=False).replace("'", "''") + "'" if table_aliases else "null"},
+                                    {"'" + json.dumps(load_info_json, ensure_ascii=False).replace("'", "''") + "'" if load_info_json else "null"}, 
                                     '{state}', 
                                     current_timestamp()
                             """).collect()

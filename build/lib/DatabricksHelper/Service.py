@@ -37,7 +37,7 @@ else:
 #from databricks.sdk.service.jobs import Run, Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, JobCluster, JobSettings, NotebookTask
 from pyspark.sql.functions import explode, col, lit, count, max, from_json, udf, struct
 from pyspark.sql.types import *
-from pyspark.sql import DataFrame, Observation, SparkSession
+from pyspark.sql import Row, DataFrame, Observation, SparkSession
 from pyspark.sql.streaming import StreamingQueryListener, StreamingQuery
 from pyspark.sql.streaming.listener import QueryProgressEvent, StreamingQueryProgress
 from datetime import datetime, timedelta, timezone
@@ -69,7 +69,8 @@ class Reload(IntFlag):
 
 class MergeMode(IntFlag):
     MergeInto = 0
-    InsertOverwrite = 1
+    DeleteAndInsert = 1
+    MergeOverwrite = 2
 
 class DataReader:
     def __init__(self, data, load_id):
@@ -1224,15 +1225,13 @@ process_functions["{field.name}"] = process_{field.name}
             update_columns = source.columns 
         start_time = time.time()
 
+        try:
+            self.spark_session.sql(f"SELECT 1 FROM {target_table} LIMIT 1").collect()
+        except Exception as ex:
+            self.spark_session.sql(f"create table {target_table} as select * from {source_table} where 1=0").collect()
+
         if mode == MergeMode.MergeInto:
-
-            try:
-                self.spark_session.sql(f"SELECT 1 FROM {target_table} LIMIT 1").collect()
-            except Exception as ex:
-                self.spark_session.sql(f"create table {target_table} as select * from {source_table} where 1=0").collect()
-
             target = DeltaTable.forName(sparkSession=self.spark_session, tableOrViewName= target_table)
-            
             merge_result = target.alias('target').merge(
                 source.alias('source'),
                 " and ".join([f"target.{k} = source.{k}" for k in keys])
@@ -1244,7 +1243,25 @@ process_functions["{field.name}"] = process_{field.name}
             .execute()
             merge_result = merge_result.first()
             
-        elif mode == MergeMode.InsertOverwrite:
+        elif mode == MergeMode.DeleteAndInsert:
+            target = DeltaTable.forName(sparkSession=self.spark_session, tableOrViewName= target_table)
+            grouping_source = source.groupBy(*keys).count()
+            merge_result = target.alias('target').merge(
+                grouping_source.alias('grouping_source'),
+                " and ".join([f"target.{k} = grouping_source.{k}" for k in keys])
+            ) \
+            .whenMatchedDelete() \
+            .execute()
+            merge_result = merge_result.first()
+            source.createOrReplaceTempView("source_table")
+            insert_result = self.spark_session.sql(f"""
+                    insert into {target_table} select * from {source_table}
+                """).collect()[0]
+            merge_result = Row(num_affected_rows=insert_result["num_affected_rows"] + merge_result["num_deleted_rows"], \
+                                num_inserted_rows=insert_result["num_inserted_rows"], \
+                                num_updated_rows=merge_result["num_deleted_rows"], \
+                                num_deleted_rows=merge_result["num_deleted_rows"])
+        elif mode == MergeMode.MergeOverwrite:
             temp_source_table = str(uuid.uuid4()).replace('-', '')
             source.createOrReplaceTempView(temp_source_table)
             self.spark_session.sql(f"""
@@ -1314,8 +1331,8 @@ process_functions["{field.name}"] = process_{field.name}
                                     {merge_result["num_deleted_rows"] if "num_deleted_rows" in merge_result else "null"},
                                     {merge_result["num_inserted_rows"] if "num_inserted_rows" in merge_result else "null"},
                                     {end_time - start_time},
-                                    '{json.dumps(table_aliases, ensure_ascii=False).replace("'", "''")}',
-                                    '{json.dumps(load_info_json, ensure_ascii=False).replace("'", "''")}', 
+                                    {"'" + json.dumps(table_aliases, ensure_ascii=False).replace("'", "''") + "'" if table_aliases else "null"},
+                                    {"'" + json.dumps(load_info_json, ensure_ascii=False).replace("'", "''") + "'" if load_info_json else "null"}, 
                                     '{state}', 
                                     current_timestamp()
                             """).collect()
