@@ -71,6 +71,7 @@ class MergeMode(IntFlag):
     MergeInto = 0
     DeleteAndInsert = 1
     MergeOverwrite = 2
+    InsertOverwrite = 3
 
 class DataReader:
     def __init__(self, data, load_id):
@@ -1280,6 +1281,11 @@ process_functions["{field.name}"] = process_{field.name}
                 """).collect()
             merge_result = self.spark_session.sql(f"INSERT OVERWRITE TABLE {target_table} select * from temp_target_{temp_source_table}").collect()
             merge_result = merge_result[0]
+        elif mode == MergeMode.InsertOverwrite:
+            temp_source_table = str(uuid.uuid4()).replace('-', '')
+            source.createOrReplaceTempView(temp_source_table)      
+            merge_result = self.spark_session.sql(f"INSERT OVERWRITE TABLE {target_table} select * from {temp_source_table}").collect()
+            merge_result = merge_result[0]      
         
         end_time = time.time()
         print(merge_result)
@@ -1326,10 +1332,10 @@ process_functions["{field.name}"] = process_{field.name}
                                     {"'" + self.task.task_key + "'" if self.task else "null"}, 
                                     '{self.spark_session.catalog.currentCatalog()}', 
                                     '{target_table}', 
-                                    {merge_result["num_affected_rows"] if "num_affected_rows" in merge_result else "null"},
-                                    {merge_result["num_updated_rows"] if "num_updated_rows" in merge_result else "null"},
-                                    {merge_result["num_deleted_rows"] if "num_deleted_rows" in merge_result else "null"},
-                                    {merge_result["num_inserted_rows"] if "num_inserted_rows" in merge_result else "null"},
+                                    {merge_result["num_affected_rows"] if "num_affected_rows" in merge_result else 0},
+                                    {merge_result["num_updated_rows"] if "num_updated_rows" in merge_result else 0},
+                                    {merge_result["num_deleted_rows"] if "num_deleted_rows" in merge_result else 0},
+                                    {merge_result["num_inserted_rows"] if "num_inserted_rows" in merge_result else 0},
                                     {end_time - start_time},
                                     {"'" + json.dumps(table_aliases, ensure_ascii=False).replace("'", "''") + "'" if table_aliases else "null"},
                                     {"'" + json.dumps(load_info_json, ensure_ascii=False).replace("'", "''") + "'" if load_info_json else "null"}, 
