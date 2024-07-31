@@ -1,5 +1,5 @@
 # Databricks notebook source
-from DatabricksHelper.Service import Pipeline
+from DatabricksHelper.Service import Pipeline, MergeMode
 from DatabricksHelper.ServiceUtils import PipelineUtils
 from pyspark.sql.types import StructType, StructField, StringType, BooleanType, ArrayType
 from pyspark.sql.functions import from_json, col
@@ -11,8 +11,8 @@ import json
 
 p_u = PipelineUtils()
 params = p_u.init_transform_params()
-p = Pipeline(params.pipeline_run_id, params.default_catalog, params.pipeline_name)
 print(params)
+p = Pipeline(params.pipeline_run_id, params.default_catalog, params.pipeline_name)
 
 # COMMAND ----------
 
@@ -151,8 +151,13 @@ def process_data(json_str):
             data = json.loads(json_str)
             if "NationalAddressVersion" in data["BusinessPartners"] and not isinstance(data["BusinessPartners"]["NationalAddressVersion"], list):
                 data["BusinessPartners"]["NationalAddressVersion"] = [data["BusinessPartners"]["NationalAddressVersion"]]
+
+            if "NationalAddressVersion" in data["BusinessPartners"]:   
+                data["BusinessPartners"]["NationalAddressVersion"] = [item for item in data["BusinessPartners"]["NationalAddressVersion"] if item]
+
             if "Roles" in data["BusinessPartners"] and not isinstance(data["BusinessPartners"]["Roles"], list):
                 data["BusinessPartners"]["Roles"] = [data["BusinessPartners"]["Roles"]] 
+
             if "MarketingAttributes" in data["BusinessPartners"] and not isinstance(data["BusinessPartners"]["MarketingAttributes"], list):
                 data["BusinessPartners"]["MarketingAttributes"] = [data["BusinessPartners"]["MarketingAttributes"]]
             return json.dumps(data, ensure_ascii=False)
@@ -165,10 +170,11 @@ def process_data(json_str):
 # COMMAND ----------
 
 load = p.get_load_info( \
-        schema={"businesspartner":{"Data":bp_schema}}, \
+        schema = {"businesspartner":{"Data":bp_schema}}, \
         debug = {"businesspartner":"evacatalog.temp.businesspartner"}, \
-        transform={"businesspartner":lambda df:df.withColumn("RawData", df["Data"]).withColumn("Data", process_data(df["Data"]))} \
-        #transform={"businesspartner":lambda df:df} \
+        transform = {"businesspartner":lambda df:df.withColumn("RawData", df["Data"]).withColumn("Data", process_data(df["Data"]))}, \
+        reload_info = params.reload_info, \
+        task_load_info = params.task_load_info
     )
 
 # COMMAND ----------
@@ -196,9 +202,45 @@ where rownum = 1""", view_name = "businesspartner_cache", catalog = params.defau
 
 # MAGIC %sql
 # MAGIC --Transform_BusinessPartner insert baisc_info
-# MAGIC delete from ${default_catalog}.bp.baisc_info 
-# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
-# MAGIC insert into ${default_catalog}.bp.baisc_info
+# MAGIC -- delete from ${default_catalog}.bp.baisc_info 
+# MAGIC -- where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
+# MAGIC -- insert into ${default_catalog}.bp.baisc_info
+# MAGIC -- select BusinessPartnerNumber,
+# MAGIC --         Data.BusinessPartners.BusinessPartnerGUID,
+# MAGIC --         Data.BusinessPartners.Type,
+# MAGIC --         Data.BusinessPartners.ValidFrom,
+# MAGIC --         Data.BusinessPartners.ValidTo,
+# MAGIC --         Data.BusinessPartners.OrganisationName1,
+# MAGIC --         Data.BusinessPartners.OrganisationName2,
+# MAGIC --         Data.BusinessPartners.OrganisationName3,
+# MAGIC --         Data.BusinessPartners.OrganisationName4,
+# MAGIC --         Data.BusinessPartners.FirstName,
+# MAGIC --         Data.BusinessPartners.MiddleName,
+# MAGIC --         Data.BusinessPartners.LastName,
+# MAGIC --         Data.BusinessPartners.Language,
+# MAGIC --         Data.BusinessPartners.Salutation,
+# MAGIC --         Data.BusinessPartners.AcademicTitle,
+# MAGIC --         Data.BusinessPartners.EmailAddress,
+# MAGIC --         Data.BusinessPartners.PhoneNumber,
+# MAGIC --         Data.BusinessPartners.FaxNumber,
+# MAGIC --         Data.BusinessPartners.Country,
+# MAGIC --         Data.BusinessPartners.CountryName,
+# MAGIC --         Data.BusinessPartners.DeletionFlag,
+# MAGIC --         Data.BusinessPartners.Blocked,
+# MAGIC --         Data.BusinessPartners.Website,
+# MAGIC --         Data.BusinessPartners.CreatedOn,
+# MAGIC --         Data.BusinessPartners.HasEmployeeResponsible,
+# MAGIC --         Data.BusinessPartners.SpecialNameFormat,
+# MAGIC --         file_path,
+# MAGIC --         received_time,
+# MAGIC --         _load_id,
+# MAGIC --         _load_time
+# MAGIC -- from businesspartner_cache
+# MAGIC -- delete from ${default_catalog}.bp.baisc_info 
+# MAGIC -- where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
+# MAGIC -- insert into ${default_catalog}.bp.baisc_info
+# MAGIC create temp view baisc_info
+# MAGIC as
 # MAGIC select BusinessPartnerNumber,
 # MAGIC         Data.BusinessPartners.BusinessPartnerGUID,
 # MAGIC         Data.BusinessPartners.Type,
@@ -230,14 +272,22 @@ where rownum = 1""", view_name = "businesspartner_cache", catalog = params.defau
 # MAGIC         _load_id,
 # MAGIC         _load_time
 # MAGIC from businesspartner_cache
+# MAGIC
+
+# COMMAND ----------
+
+p.merge_table(['businesspartner'], 'bp.baisc_info', 'baisc_info', ['BusinessPartnerNumber'], MergeMode.DeleteAndInsert)
+#MergeMode.MergeInto, MergeMode.DeleteAndInsert, MergeMode.MergeOverwrite, MergeMode.InsertOverwrite
 
 # COMMAND ----------
 
 # MAGIC %sql
 # MAGIC --Transform_Business_create national_address_Version
-# MAGIC delete from ${default_catalog}.bp.national_address_Version
-# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
-# MAGIC insert into ${default_catalog}.bp.national_address_Version
+# MAGIC -- delete from ${default_catalog}.bp.national_address_Version
+# MAGIC -- where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
+# MAGIC -- insert into ${default_catalog}.bp.national_address_Version
+# MAGIC create temp view national_address_Version
+# MAGIC as
 # MAGIC select 
 # MAGIC   BusinessPartnerNumber,
 # MAGIC   Data.BusinessPartners.NationalAddressVersion.Name1,
@@ -252,11 +302,17 @@ where rownum = 1""", view_name = "businesspartner_cache", catalog = params.defau
 
 # COMMAND ----------
 
+p.merge_table(['businesspartner'], 'bp.national_address_Version', 'national_address_Version', ['BusinessPartnerNumber'], MergeMode.DeleteAndInsert)
+
+# COMMAND ----------
+
 # MAGIC %sql
 # MAGIC --Transform_Business_create contact_persons
-# MAGIC delete from ${default_catalog}.bp.contact_persons
-# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
-# MAGIC insert into ${default_catalog}.bp.contact_persons
+# MAGIC -- delete from ${default_catalog}.bp.contact_persons
+# MAGIC -- where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
+# MAGIC -- insert into ${default_catalog}.bp.contact_persons
+# MAGIC create temp view contact_persons
+# MAGIC as
 # MAGIC select  BusinessPartnerNumber,
 # MAGIC         ContactPersons.ContactPersonNumber,
 # MAGIC         ContactPersons.ContactPersonGUID,
@@ -285,11 +341,17 @@ where rownum = 1""", view_name = "businesspartner_cache", catalog = params.defau
 
 # COMMAND ----------
 
+p.merge_table(['businesspartner'], 'bp.contact_persons', 'contact_persons', ['BusinessPartnerNumber'], MergeMode.DeleteAndInsert)
+
+# COMMAND ----------
+
 # MAGIC %sql
 # MAGIC --Transform_Business_create sales_areas
-# MAGIC delete from ${default_catalog}.bp.sales_areas
-# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
-# MAGIC insert into ${default_catalog}.bp.sales_areas
+# MAGIC -- delete from ${default_catalog}.bp.sales_areas
+# MAGIC -- where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
+# MAGIC -- insert into ${default_catalog}.bp.sales_areas
+# MAGIC create temp view sales_areas
+# MAGIC as
 # MAGIC select 
 # MAGIC   BusinessPartnerNumber,
 # MAGIC   SalesAreas.SalesOrg,
@@ -321,11 +383,17 @@ where rownum = 1""", view_name = "businesspartner_cache", catalog = params.defau
 
 # COMMAND ----------
 
+p.merge_table(['businesspartner'], 'bp.sales_areas', 'sales_areas', ['BusinessPartnerNumber'], MergeMode.DeleteAndInsert)
+
+# COMMAND ----------
+
 # MAGIC %sql
 # MAGIC --Transform_Business_create Roles
-# MAGIC delete from ${default_catalog}.bp.bp_roles
-# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
-# MAGIC insert into ${default_catalog}.bp.bp_roles
+# MAGIC -- delete from ${default_catalog}.bp.bp_roles
+# MAGIC -- where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
+# MAGIC -- insert into ${default_catalog}.bp.bp_roles
+# MAGIC create temp view bp_roles
+# MAGIC as
 # MAGIC select 
 # MAGIC   BusinessPartnerNumber,
 # MAGIC   Data.BusinessPartners.Roles.RoleCode,
@@ -337,11 +405,17 @@ where rownum = 1""", view_name = "businesspartner_cache", catalog = params.defau
 
 # COMMAND ----------
 
+p.merge_table(['businesspartner'], 'bp.bp_roles', 'bp_roles', ['BusinessPartnerNumber'], MergeMode.DeleteAndInsert)
+
+# COMMAND ----------
+
 # MAGIC %sql
 # MAGIC --Transform_Business_create marketing_attributes
-# MAGIC delete from  ${default_catalog}.bp.marketing_attributes
-# MAGIC where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
-# MAGIC insert into ${default_catalog}.bp.marketing_attributes
+# MAGIC -- delete from  ${default_catalog}.bp.marketing_attributes
+# MAGIC -- where BusinessPartnerNumber in (select BusinessPartnerNumber from businesspartner_cache);
+# MAGIC -- insert into ${default_catalog}.bp.marketing_attributes
+# MAGIC create temp view marketing_attributes
+# MAGIC as
 # MAGIC select 
 # MAGIC   BusinessPartnerNumber,
 # MAGIC   MarketingAttributes.AttributeSet,
@@ -362,15 +436,23 @@ where rownum = 1""", view_name = "businesspartner_cache", catalog = params.defau
 
 # COMMAND ----------
 
+p.merge_table(['businesspartner'], 'bp.marketing_attributes', 'marketing_attributes', ['BusinessPartnerNumber'], MergeMode.DeleteAndInsert)
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC select * from ${default_catalog}.bp.baisc_info 
+
+# COMMAND ----------
+
 # MAGIC %sql
 # MAGIC --truncate table  ${default_catalog}.bp.marketing_attributes
 # MAGIC --truncate table   ${default_catalog}.bp.bp_roles
 # MAGIC --truncate table   ${default_catalog}.bp.sales_areas
 # MAGIC --truncate table  ${default_catalog}.bp.contact_persons
 # MAGIC --truncate table  ${default_catalog}.bp.national_address_Version
-# MAGIC select * from  ${default_catalog}.bp.baisc_info where BusinessPartnerNumber is null --10289
+# MAGIC select *
+# MAGIC from  ${default_catalog}.bp.baisc_info 
+# MAGIC where BusinessPartnerNumber is null --10289
 # MAGIC
-
-# COMMAND ----------
-
-
+# MAGIC

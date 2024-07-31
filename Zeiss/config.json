@@ -2,7 +2,9 @@
     "Workspace": {
         "Token": {
             "Scope": "databricks-token",
-            "Secret": "adb-732672050507723-token"
+            "Secret": "adb-732672050507723-token",
+            "ClientId": "adb-732672050507723-clientid",
+            "ClientSecret": "adb-732672050507723-clientsecret"
         }
     },
     "Job": {
@@ -22,6 +24,7 @@
         }
     },
     "Data": {
+        "Catalog": "evacatalog",
         "Checkpoint": {
             "Path": "/Volumes/evacatalog/workflow/checkpoints/"
         },

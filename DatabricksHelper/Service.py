@@ -59,6 +59,8 @@ import re
 import threading
 import requests
 import base64
+import csv
+import io
 
 class Reload(IntFlag):
     DEFAULT = 0
@@ -204,8 +206,8 @@ class PipelineService:
         if "currentRunId" in self.context:
             task_run_id = self.context["rootRunId"]
             if task_run_id != "" and task_run_id is not None:
-                run = self.workspace.jobs.get_run(task_run_id)
                 try:
+                    run = self.workspace.jobs.get_run(task_run_id)
                     self.job = self.workspace.jobs.get(run.job_id)
                     tasks = [task for task in self.job.settings.tasks if task.task_key == run.run_name]
                     if len(tasks) > 0:
@@ -284,6 +286,7 @@ class PipelineService:
     context:dict
     job:Optional[Job]
     task:Optional[Task]
+    catalog:str
 
     def __init__(self, spark:SparkSession = None):
         self.session_id:str = str(uuid.uuid4())
@@ -295,10 +298,17 @@ class PipelineService:
         self.host = self.spark_session.conf.get("spark.databricks.workspaceUrl")
         self.workspace_id = self.host.split('.', 1)[0]
         token = self.databricks_dbutils.secrets.get(scope=self.config["Workspace"]["Token"]["Scope"], key=self.config["Workspace"]["Token"]["Secret"])
-        self.workspace = WorkspaceClient(host=self.host, token=token)
+        client_id = self.databricks_dbutils.secrets.get(scope=self.config["Workspace"]["Token"]["Scope"], key=self.config["Workspace"]["Token"]["ClientId"])
+        client_secret = self.databricks_dbutils.secrets.get(scope=self.config["Workspace"]["Token"]["Scope"], key=self.config["Workspace"]["Token"]["ClientSecret"])
+        if client_id and client_secret:
+            print("Using databricks service principal")
+            self.workspace = WorkspaceClient(host=self.host, client_id=client_id, client_secret=client_secret)
+        else:
+            self.workspace = WorkspaceClient(host=self.host, token=token)
+            print("Using personal access token")
         self.api = PipelineAPI(host=self.host, token=token)
+        self.catalog = self.config["Data"]["Catalog"]
         context = json.loads(self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext().safeToJson())
-        
         # run_wait = self.workspace.jobs.repair_run(run_id=0, latest_repair_id=0, rerun_all_failed_tasks=True)
         # run_wait.result()
         # {
@@ -598,7 +608,7 @@ class PipelineCluster(PipelineService):
 
         print(f"Entry cluster: {self.cluster.cluster_id}({self.cluster.cluster_name})")
 
-        job_cluster_file = os.path.join(self.config["Job"]["Cluster"]["Path"], self.workspace_id, f"{job_name}.json")
+        job_cluster_file = os.path.join(self.config["Job"]["Cluster"]["Path"], self.default_catalog, f"{job_name}.json")#self.workspace_id, 
         if os.path.exists(job_cluster_file):
             print(f"The job cluster file '{job_cluster_file}' exists.")
             with open(job_cluster_file, 'r') as file:
@@ -665,9 +675,17 @@ class PipelineCluster(PipelineService):
         else:
             print(f"The job cluster file '{job_cluster_file}' does not exist.")
     
-    def __init__(self, spark):
+    def __init__(self, default_catalog, spark):
         super().__init__(spark)
         self._init_cluster()
+        
+        if default_catalog:
+            self.default_catalog = self.parse_task_param(default_catalog)
+            self.set_default_catalog(self.default_catalog)
+        else:
+            self.default_catalog = self.spark_session.catalog.currentCatalog()
+        print(f"Current catalog:{self.default_catalog}")
+
         self.jobs = {}
         for job in self.workspace.jobs.list():
             if job.settings.name in self.jobs:
@@ -758,7 +776,7 @@ class Pipeline(PipelineCluster):
         print(f"Running the job {job_name}.")
         return (self.__running(wait_run, timeout), self.__check_continue(job_name))
 
-    def __read_data(self, source_file, file_format, schema_dir, reader_options = None):
+    def __read_data(self, source_file, file_format, schema_dir, reader_options = None, column_names = None):
         if not self.last_load.load_info or self.last_load.load_info["status"] == "succeeded":
             load_id = str(uuid.uuid4())
         else:
@@ -779,10 +797,18 @@ class Pipeline(PipelineCluster):
             for key, value in reader_options.items():
                 df = df.option(key, value)
 
-        df = df.load(source_file) \
-        .withColumn("_source_metadata",col("_metadata")) \
+        df = df.load(source_file)
+
+        if column_names:
+            column_names = io.StringIO(column_names)
+            column_reader = csv.reader(column_names, delimiter=',')
+            new_column_names = next(column_reader)
+            df = df.toDF(*new_column_names + ["_rescued_data"])
+ 
+        df = df.withColumn("_source_metadata",col("_metadata")) \
         .withColumn("_load_id",lit(load_id)) \
         .withColumn("_load_time",lit(datetime.now())) 
+
         reader = DataReader(df, load_id)
         return reader
 
@@ -920,12 +946,13 @@ process_functions["{field.name}"] = process_{field.name}
 
         return df
 
-    def load_table(self, target_table, source_file, file_format, table_alias = None, reader_options = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1, streaming_processor = None):
+    def load_table(self, target_table, source_file, file_format, table_alias = None, reader_options = None, column_names = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1, streaming_processor = None):
         source_file = self.__parse_task_param(source_file)
         target_table = self.__parse_task_param(target_table)
         file_format = self.__parse_task_param(file_format)
         table_alias = self.__parse_task_param(table_alias)
         reader_options = self.__parse_task_param(reader_options)
+        column_names = self.__parse_task_param(column_names)
         max_load_rows = self.__parse_task_param(max_load_rows)
         reload_table = self.__parse_task_param(reload_table)
         streaming_processor = self.__parse_task_param(streaming_processor)
@@ -935,6 +962,7 @@ process_functions["{field.name}"] = process_{field.name}
         print(f"file_format:{file_format}")
         print(f"table_alias:{table_alias}")
         print(f"reader_options:{reader_options}")
+        print(f"reader_options:{column_names}")
         print(f"transform:{transform}")
         print(f"reload_table:{reload_table}")
         print(f"streaming_processor:{streaming_processor}")
@@ -969,7 +997,7 @@ process_functions["{field.name}"] = process_{field.name}
                     print(f'clear table:{target_table}')
         #spark.streams.addListener(Listener())
 
-        reader = self.__read_data(source_file, file_format, schema_dir, reader_options)
+        reader = self.__read_data(source_file, file_format, schema_dir, reader_options, column_names)
         df = reader.data
         load_id = reader.load_id
         #.selectExpr("*", "_metadata as source_metadata")
@@ -1107,14 +1135,12 @@ process_functions["{field.name}"] = process_{field.name}
             self.databricks_dbutils.jobs.taskValues.set(key = key, value = json.dumps(_value))
 
 
-
-
-    def get_load_info(self, schema = None, debug = None, transform = None):
+    def get_load_info(self, schema = None, debug = None, transform = None, task_load_info = None, reload_info = None):
         #context = self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext()
         
 
         all_load_info = {}
-        if self.job is not None and self.task is not None:
+        if self.job is not None and self.task is not None and not reload_info:
             load_info_schema = StructType([
                 StructField("table", StringType(), True),
                 StructField("view", StringType(), True),
@@ -1123,9 +1149,7 @@ process_functions["{field.name}"] = process_{field.name}
             df_load_info = self.spark_session.createDataFrame([], load_info_schema)
             df_load_info.createOrReplaceTempView('load_info')
 
-            if self.task_load_info:
-                task_load_info = self.task_load_info
-            else:
+            if not task_load_info:
                 task_load_info = self.get_task_values()
             for task_key, load_info_value in task_load_info.items():
                 print(load_info_value)
@@ -1173,18 +1197,58 @@ process_functions["{field.name}"] = process_{field.name}
                 print(f"{table.name} {table.tableType}")
             self.spark_session.sql("select * from load_info").collect()            
             print(all_load_info)
-        elif debug is not None:
-            print('No task_run_id found, debug mode.')
+        elif debug or reload_info:
+            debug = reload_info if reload_info else debug
+            print('No task_run_id found, reload mode.') if reload_info else print('No task_run_id found, debug mode.')
+            print(debug)
             for temp_view, temp_table in debug.items():
-                query = f"""
-                    SELECT t.* FROM {temp_table} t where _load_id = 
-                    (
-                        SELECT MAX(_load_id)
-                        FROM {temp_table}
-                        WHERE _load_time = (SELECT MAX(_load_time) FROM {temp_table})
-                    )
-                    and _validations.is_valid = TRUE
-                    """
+                if isinstance(temp_table, str):
+                    check_str_is_table = re.sub(r"'.*?'", "", temp_table)
+                    check_str_is_table = re.sub(r"`.*?`", "", check_str_is_table)
+                    sql_keywords = ["SELECT", "FROM", "WHERE", "JOIN", "GROUP BY", "ORDER BY"]
+                    str_is_table = True
+                    for keyword in sql_keywords:
+                        if keyword.lower() in check_str_is_table.lower():
+                            str_is_table = False
+                            break
+                    if str_is_table:
+                        query = f"""
+                            SELECT t.* FROM {temp_table} t where _load_id = 
+                            (
+                                SELECT MAX(_load_id)
+                                FROM {temp_table}
+                                WHERE _load_time = (SELECT MAX(_load_time) FROM {temp_table})
+                            )
+                            and _validations.is_valid = TRUE
+                            """
+                    else:
+                        query = f"""
+                                SELECT * FROM ({temp_table}) t
+                                where _validations.is_valid = TRUE
+                            """
+
+                elif isinstance(temp_table, dict) and "table" in temp_table:
+                    condition = f"""
+                            _load_id = 
+                            (
+                                SELECT MAX(_load_id)
+                                FROM {temp_table["table"]}
+                                WHERE _load_time = (SELECT MAX(_load_time) FROM {temp_table["table"]})
+                            )
+                        """
+                    if "condition" in temp_table and temp_table["condition"]:
+                        condition = temp_table["condition"]
+                    
+                    query = f"""
+                        SELECT t.* FROM {temp_table["table"]} t where 
+                        {condition}
+                        and _validations.is_valid = TRUE
+                        """
+                elif isinstance(temp_table, dict) and "query" in temp_table:
+                    query = temp_table["query"]
+                else:
+                    raise Exception("Invalid debug table")
+                
                 temp_df = self.spark_session.sql(query)
                 if transform is not None and temp_view in transform:
                     transform_func = transform[temp_view]
@@ -1192,7 +1256,7 @@ process_functions["{field.name}"] = process_{field.name}
                         temp_df = transform_func(temp_df)
                 temp_df.createOrReplaceTempView(temp_view)
                 all_load_info[temp_view] = temp_df
-        if schema is not None:
+        if schema:
             for temp_view, temp_df in all_load_info.items():
                 view_schema = schema.get(temp_view)
                 if view_schema:
@@ -1210,7 +1274,7 @@ process_functions["{field.name}"] = process_{field.name}
     def set_default_catalog(self, catalog):
         self.spark_session.catalog.setCurrentCatalog(catalog)
 
-    def merge_table(self, table_aliases, target_table: str, source_table: Union[str, DataFrame], keys, mode: MergeMode, source_script = None, schema = "workflow", insert_columns = None, update_columns = None, state = 'succeeded'):
+    def merge_table(self, table_aliases, target_table: str, source_table: Union[str, DataFrame], keys, mode: MergeMode, merge_overwrite_no_match = None, source_script = None, schema = "workflow", insert_columns = None, update_columns = None, state = 'succeeded'):
         if source_table and isinstance(source_table, str):
             source = self.spark_session.table(source_table)
         elif source_table and isinstance(source_table, DataFrame):
@@ -1265,9 +1329,17 @@ process_functions["{field.name}"] = process_{field.name}
         elif mode == MergeMode.MergeOverwrite:
             temp_source_table = str(uuid.uuid4()).replace('-', '')
             source.createOrReplaceTempView(temp_source_table)
+            no_match_fields = "t1.*"
+            #no_match = [{"IsActive": 1}]
+            format_value = lambda value: value if isinstance(value, (int, float)) else f"'{value}'"
+            if merge_overwrite_no_match:
+                no_match_keys = [key for item in merge_overwrite_no_match for key in item.keys()]
+                no_match_fields = ",".join([f"t1.`{column}`" for column in update_columns if column not in no_match_keys])
+                no_match_fields += "," + ",".join([f"{item[key]} as `{key}`" for item in merge_overwrite_no_match for key in item.keys()])
+
             self.spark_session.sql(f"""
                 CREATE OR REPLACE TEMP VIEW temp_target_{temp_source_table} AS
-                SELECT t1.*
+                SELECT {no_match_fields}
                 FROM {target_table} t1
                 LEFT ANTI JOIN (select distinct {", ".join(keys)} 
                 from {temp_source_table}) t2 
@@ -1275,10 +1347,11 @@ process_functions["{field.name}"] = process_{field.name}
                 union all
                 SELECT t2.*
                 FROM {temp_source_table} t2
-                JOIN (select distinct {", ".join(keys)} 
-                from {target_table}) t1 
-                ON {" and ".join([f"t1.{column_name} = t2.{column_name}" for column_name in keys])}
                 """).collect()
+            
+                # LEFT JOIN (select distinct {", ".join(keys)} 
+                # from {target_table}) t1 
+                # ON {" and ".join([f"t1.{column_name} = t2.{column_name}" for column_name in keys])}
             merge_result = self.spark_session.sql(f"INSERT OVERWRITE TABLE {target_table} select * from temp_target_{temp_source_table}").collect()
             merge_result = merge_result[0]
         elif mode == MergeMode.InsertOverwrite:
@@ -1413,7 +1486,7 @@ process_functions["{field.name}"] = process_{field.name}
         else:
             log_folder = os.path.join(log_folder if log_folder else "notebook")
             log_folder = os.path.join(log_folder, self.context["notebook_path"].strip('/'))
-        log_path = os.path.join(self.config["Log"]["Path"], log_folder)
+        log_path = os.path.join(self.config["Log"]["Path"], self.default_catalog if self.default_catalog else "", log_folder)
         print(log_folder)
         return LogService(self.session_id, self.pipeline_run_id, log_path)
 
@@ -1437,22 +1510,17 @@ process_functions["{field.name}"] = process_{field.name}
         self.last_load = SimpleNamespace(**self.last_load)
         print(self.last_load)
 
-    def __init__(self, pipeline_run_id, default_catalog = None, pipeline_name = None, task_load_info = None, spark = None):
-        super().__init__(spark)
-
+    def __init__(self, pipeline_run_id, default_catalog, pipeline_name = None, spark = None):
+        super().__init__(default_catalog, spark)
+        
         self.pipeline_run_id = pipeline_run_id
         self.pipeline_name = pipeline_name
-        self.task_load_info = task_load_info
         self.logs = self.__init_logs(self.job, self.task)
-
+        
         print(self.context)
         print(f"Current job: {self.job.settings.name}") if self.job else print("Current job: None")
         print(f"Current task: {self.task.task_key}") if self.task else print("Current task: None")
-        self.default_catalog = None
         self.streaming_metrics = StreamingMetrics()
-        if default_catalog:
-            self.default_catalog = self.parse_task_param(default_catalog)
-            self.set_default_catalog(self.default_catalog)
 
 
 __all__ = ['Pipeline', 'Reload', 'MergeMode']

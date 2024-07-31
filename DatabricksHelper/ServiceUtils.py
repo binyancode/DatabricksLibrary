@@ -91,7 +91,7 @@ class PipelineUtils:
 
     def init_load_params(self):
         params = self.init_common_params(["target_table","source_file", "file_format", "table_alias", \
-                                          ("reader_options","{}","json.loads"), ("reload_table", "Reload.DEFAULT"), \
+                                          ("reader_options","{}","json.loads"), "column_names", ("reload_table", "Reload.DEFAULT"), \
                                             ("max_load_rows", "-1", "int"), "validation"], False)
         # parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "target_table", \
         #                   "source_file", "file_format", "table_alias", ("reader_options","{}","json.loads"), \
@@ -101,18 +101,23 @@ class PipelineUtils:
         return params
     
     def init_run_notebook_params(self):
-        params = self.init_common_params(["notebook_path", ("notebook_timeout", "-1", "int"), "task_load_info"], False)
+        params = self.init_common_params(["notebook_path", ("notebook_timeout", "-1", "int"), "task_load_info", "reload_info"], False)
         #parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "notebook_path", ("notebook_timeout", "-1", "int"), "task_load_info", "task_parameters"]
         #params = self.__init_params(parameter_list)
         #params = SimpleNamespace(**params)
         return params
 
     def init_transform_params(self):
-        params = self.init_common_params(["task_load_info"])
+        params = self.init_common_params(["task_load_info", "reload_info"])
         params = vars(params)
         if params["task_load_info"] and isinstance(params["task_load_info"], str):
             try:
                 params["task_load_info"] = json.loads(params["task_load_info"])
+            except Exception as e: 
+                print(e)
+        if params["reload_info"] and isinstance(params["reload_info"], str):
+            try:
+                params["reload_info"] = json.loads(params["reload_info"])
             except Exception as e: 
                 print(e)
         params = SimpleNamespace(**params)
@@ -156,6 +161,45 @@ class PipelineUtils:
 
     def sql_param(self, key, value):
         self.pipeline_service.databricks_dbutils.widgets.text(key, value)
+
+    def reload(self, notebook_path, notebook_timeout, reload_info, params = {}):
+        #{"businesspartner":{"query":"select * from evacatalog.temp.businesspartner", "batch_size":10000}}
+        if reload_info and isinstance(reload_info, str):
+            reload_info = json.loads(reload_info)
+        print(reload_info)
+        if reload_info and isinstance(reload_info, dict):
+            for key, value in reload_info.items():
+                table = value["query"]
+                rows = self.pipeline_service.spark_session.sql(f"select _load_id, max(_load_time) as _load_time, count(1) as _count from ({table}) t group by _load_id order by _load_time").collect()
+                index = 0
+                loads = []
+                row_count = 0
+                if "batch_size" in value:
+                    batch_size = value["batch_size"]
+                else:
+                    batch_size = 50000
+                if "partition_size" in value:
+                    partition_size = value["partition_size"]
+                else:
+                    partition_size = 50
+                partition_count = 0;
+                for row in rows:
+                    index += 1
+                    partition_count += 1
+                    load_id = row["_load_id"]
+                    load_time = row["_load_time"]
+                    count = row["_count"]
+                    loads.append(load_id)
+                    row_count += count
+                    if row_count >= batch_size or partition_count >= partition_size or index >= len(rows):
+                        load_ids = ', '.join([f"'{item}'" for item in loads])
+                        #print(load_ids, row_count)
+                        params["reload_info"] = json.dumps({f"{key}": f"select * from ({table}) t where _load_id in ({load_ids})"})
+                        print(params, load_time, row_count)
+                        self.pipeline_service.databricks_dbutils.notebook.run(notebook_path, notebook_timeout, arguments=params)
+                        row_count = 0
+                        partition_count = 0
+                        loads = []
 
     def __init__(self, spark:SparkSession=None) -> None:
         self.pipeline_service = PipelineService(spark)
