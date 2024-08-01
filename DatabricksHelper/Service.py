@@ -798,12 +798,13 @@ class Pipeline(PipelineCluster):
                 df = df.option(key, value)
 
         df = df.load(source_file)
-
+        
         if column_names:
             column_names = io.StringIO(column_names)
             column_reader = csv.reader(column_names, delimiter=',')
             new_column_names = next(column_reader)
-            df = df.toDF(*new_column_names + ["_rescued_data"])
+
+            df = df.toDF(*new_column_names + df.columns[len(new_column_names):])
  
         df = df.withColumn("_source_metadata",col("_metadata")) \
         .withColumn("_load_id",lit(load_id)) \
