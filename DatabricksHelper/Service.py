@@ -699,7 +699,7 @@ class Pipeline(PipelineCluster):
         if self.last_run.job_run_id and self.last_run.job_run_result in ("FAILED", "TIMEDOUT", "CANCELED"):
             self.logs.log("operations", { "operation": f're-run job:{job_name}' })
             
-            wait_run = self.workspace.jobs.repair_run(self.last_run.job_run_id, latest_repair_id=self.last_run.latest_repair_id, notebook_params=params, rerun_all_failed_tasks=True)
+            wait_run = self.workspace.jobs.repair_run(self.last_run.job_run_id, latest_repair_id=self.last_run.latest_repair_id, job_parameters=params, rerun_all_failed_tasks=True)
             print(f"Re-running the job {job_name} with status {self.last_run.job_run_result}.")
 
             return self.__running(wait_run, timeout)
@@ -740,13 +740,17 @@ class Pipeline(PipelineCluster):
         self.logs.flush_log()
         return result_dict
 
-    def run(self, job_name:str, params = None, continue_run = True, timeout = 3600):
+    def run(self, job_name:str, params:dict = None, continue_run = True, timeout = 3600, continue_callback:Callable[[dict, dict, int], bool] = None):
         self.__get_last_run()
         continue_status = True
         index = 0
         while continue_status:
             index+=1
             run, continue_status = self.run_internal(job_name, params, timeout)
+            if continue_callback is not None and callable(continue_callback):
+                continue_status = continue_callback(run, params, index)
+            elif "reload_table" in params:
+                params["reload_table"] = 'Reload.DEFAULT'
             if not continue_run or not continue_status:
                 return run
             else:
@@ -772,7 +776,7 @@ class Pipeline(PipelineCluster):
                 params = {}
             params["default_catalog"] = self.default_catalog
         self.logs.log("operations", { "operation": f'run job:{job_name}' })
-        wait_run = self.workspace.jobs.run_now(job_id, notebook_params=params)
+        wait_run = self.workspace.jobs.run_now(job_id, job_parameters=params)
         print(f"Running the job {job_name}.")
         return (self.__running(wait_run, timeout), self.__check_continue(job_name))
 
@@ -963,7 +967,7 @@ process_functions["{field.name}"] = process_{field.name}
         print(f"file_format:{file_format}")
         print(f"table_alias:{table_alias}")
         print(f"reader_options:{reader_options}")
-        print(f"reader_options:{column_names}")
+        print(f"column_names:{column_names}")
         print(f"transform:{transform}")
         print(f"reload_table:{reload_table}")
         print(f"streaming_processor:{streaming_processor}")
@@ -1136,10 +1140,9 @@ process_functions["{field.name}"] = process_{field.name}
             self.databricks_dbutils.jobs.taskValues.set(key = key, value = json.dumps(_value))
 
 
-    def get_load_info(self, schema = None, debug = None, transform = None, task_load_info = None, reload_info = None):
+    def get_load_info(self, schema = None, debug = None, transform = None, task_load_info = None, reload_info = None, load_option = None):
         #context = self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext()
-        
-
+   
         all_load_info = {}
         if self.job is not None and self.task is not None and not reload_info:
             load_info_schema = StructType([
@@ -1159,12 +1162,6 @@ process_functions["{field.name}"] = process_{field.name}
                     df_load_info = df_load_info.union(self.spark_session.createDataFrame([(load_info["table"], load_info["view"], load_info["load_id"])], load_info_schema))
                     df_load_info.createOrReplaceTempView('load_info')
 
-                    query = f"""
-                        SELECT * 
-                        FROM {load_info["table"]} 
-                        WHERE _load_id = '{load_info["load_id"]}' 
-                        and _validations.is_valid = TRUE
-                        """
                     catalog = ""
                     db = ""
                     table = ""
@@ -1179,6 +1176,22 @@ process_functions["{field.name}"] = process_{field.name}
                     temp_view = f"{catalog}_{db}_{table}"
                     if load_info["view"]:
                         temp_view = eval(f'f"{load_info["view"]}"')
+
+                    load_option_filter = ""
+                    if load_option is not None and temp_view in load_option:
+                        if "latest_file" in load_option[temp_view] and load_option[temp_view]["latest_file"]:
+                            load_option_filter = f"""
+                                and `_source_metadata`.file_name in(
+                                select `_source_metadata`.file_name from {load_info["table"]}
+                                order by `_source_metadata`.file_modification_time desc
+                                limit 1)"""   
+
+                    query = f"""
+                        SELECT * 
+                        FROM {load_info["table"]} 
+                        WHERE _load_id = '{load_info["load_id"]}' 
+                        and _validations.is_valid = TRUE {load_option_filter}
+                        """
                     temp_df = self.spark_session.sql(query)
                     if transform is not None and temp_view in transform:
                         transform_func = transform[temp_view]
@@ -1203,6 +1216,16 @@ process_functions["{field.name}"] = process_{field.name}
             print('No task_run_id found, reload mode.') if reload_info else print('No task_run_id found, debug mode.')
             print(debug)
             for temp_view, temp_table in debug.items():
+                
+                load_option_filter = ""
+                if load_option is not None and temp_view in load_option:
+                    if "latest_file" in load_option[temp_view] and load_option[temp_view]["latest_file"]:
+                        load_option_filter = f"""
+                            and `_source_metadata`.file_name in(
+                            select `_source_metadata`.file_name from {temp_table}
+                            order by `_source_metadata`.file_modification_time desc
+                            limit 1)"""  
+                            
                 if isinstance(temp_table, str):
                     check_str_is_table = re.sub(r"'.*?'", "", temp_table)
                     check_str_is_table = re.sub(r"`.*?`", "", check_str_is_table)
@@ -1211,7 +1234,8 @@ process_functions["{field.name}"] = process_{field.name}
                     for keyword in sql_keywords:
                         if keyword.lower() in check_str_is_table.lower():
                             str_is_table = False
-                            break
+                            break 
+
                     if str_is_table:
                         query = f"""
                             SELECT t.* FROM {temp_table} t where _load_id = 
@@ -1220,12 +1244,12 @@ process_functions["{field.name}"] = process_{field.name}
                                 FROM {temp_table}
                                 WHERE _load_time = (SELECT MAX(_load_time) FROM {temp_table})
                             )
-                            and _validations.is_valid = TRUE
+                            and _validations.is_valid = TRUE {load_option_filter}
                             """
                     else:
                         query = f"""
                                 SELECT * FROM ({temp_table}) t
-                                where _validations.is_valid = TRUE
+                                where _validations.is_valid = TRUE  {load_option_filter}
                             """
 
                 elif isinstance(temp_table, dict) and "table" in temp_table:
@@ -1243,7 +1267,7 @@ process_functions["{field.name}"] = process_{field.name}
                     query = f"""
                         SELECT t.* FROM {temp_table["table"]} t where 
                         {condition}
-                        and _validations.is_valid = TRUE
+                        and _validations.is_valid = TRUE  {load_option_filter}
                         """
                 elif isinstance(temp_table, dict) and "query" in temp_table:
                     query = temp_table["query"]
@@ -1280,8 +1304,16 @@ process_functions["{field.name}"] = process_{field.name}
             source = self.spark_session.table(source_table)
         elif source_table and isinstance(source_table, DataFrame):
             source = source_table
+            source_table = str(uuid.uuid4()).replace('-', '')
+            source.createOrReplaceTempView(source_table)
         elif source_script:
             source = self.spark_session.sql(source_script)
+            source_table = str(uuid.uuid4()).replace('-', '')
+            source.createOrReplaceTempView(source_table)
+        else: #connect.dataframe.DataFrame
+            source = source_table
+            source_table = str(uuid.uuid4()).replace('-', '')
+            source.createOrReplaceTempView(source_table)
         #keys = {"BusinessPartnerGUID": "BusinessPartnerGUID"} #source:target
 
         if not insert_columns:

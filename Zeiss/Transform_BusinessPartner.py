@@ -174,7 +174,8 @@ load = p.get_load_info( \
         debug = {"businesspartner":"evacatalog.temp.businesspartner"}, \
         transform = {"businesspartner":lambda df:df.withColumn("RawData", df["Data"]).withColumn("Data", process_data(df["Data"]))}, \
         reload_info = params.reload_info, \
-        task_load_info = params.task_load_info
+        task_load_info = params.task_load_info, \
+        load_option = {"businesspartner":{"latest_file":True}}
     )
 
 # COMMAND ----------
