@@ -508,7 +508,7 @@ class StreamingListener(StreamingQueryListener):
         self.end_time = time.time()
         self.metrics.terminate()
         self.logs.log("streaming", {"metrics":self.metrics.as_dict(), "max_load_rows":self.max_load_rows, "continue_status":False or self.metrics.streaming_status == "Stopped"}, True)
-        self.logs.post_log("Finished", "load_table", {"metrics":self.metrics.as_dict(), "load_duration": self.end_time - self.start_time })
+        self.logs.post_log("Finished", "load_table", {"metrics":self.metrics.as_dict(), "load_table_info": self.load_table_info, "load_duration": self.end_time - self.start_time })
         print(f"stream terminated!")
 
     logs:LogService
@@ -516,11 +516,12 @@ class StreamingListener(StreamingQueryListener):
     progress:Callable[[StreamingMetrics, StreamingQueryProgress, int], None]
     max_load_rows:int
 
-    def __init__(self, logs: LogService, metrics: StreamingMetrics, progress:Callable[[StreamingQueryProgress], None] = None, max_load_rows = -1):
+    def __init__(self, logs: LogService, metrics: StreamingMetrics, progress:Callable[[StreamingQueryProgress], None] = None, max_load_rows = -1, load_table_info = None):
         self.logs = logs
         self.metrics = metrics
         self.progress = progress
         self.max_load_rows = max_load_rows
+        self.load_table_info = load_table_info
 
 class PipelineCluster(PipelineService):
     def _get_job_id(self, job_name:str) -> int:
@@ -1025,7 +1026,17 @@ process_functions["{field.name}"] = process_{field.name}
 
         self.__get_last_load()
 
-        self.__add_streaming_listener(max_load_rows)
+        load_table_info = {
+            "target_table": target_table,
+            "source_file": source_file,
+            "file_format": file_format,
+            "table_alias": table_alias,
+            "reader_options": reader_options,
+            "column_names": column_names,
+            "reload_table": reload_table,
+        }
+
+        self.__add_streaming_listener(max_load_rows, load_table_info)
         #target_table = self.spark_session.sql(f'DESC DETAIL {target_table}').first()["name"]
         catalog = self.__get_catalog(target_table) if not self.default_catalog else self.default_catalog
         print(f"Current catalog:{catalog}")
@@ -1548,9 +1559,9 @@ process_functions["{field.name}"] = process_{field.name}
                 metrics.stop()
                 stream.stop()
 
-    def __add_streaming_listener(self, max_load_rows = -1):
+    def __add_streaming_listener(self, max_load_rows = -1, load_table_info = None):
         if Pipeline.streaming_listener is None:
-            Pipeline.streaming_listener = StreamingListener(self.logs, self.streaming_metrics, self.__streaming_progress, max_load_rows)
+            Pipeline.streaming_listener = StreamingListener(self.logs, self.streaming_metrics, self.__streaming_progress, max_load_rows, load_table_info)
             self.spark_session.streams.addListener(Pipeline.streaming_listener)
             print(f"add {Pipeline.streaming_listener}")
         else:
