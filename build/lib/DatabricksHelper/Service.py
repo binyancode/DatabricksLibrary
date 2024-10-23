@@ -61,6 +61,7 @@ import requests
 import base64
 import csv
 import io
+import traceback
 
 class Reload(IntFlag):
     DEFAULT = 0
@@ -358,9 +359,44 @@ class PipelineService:
 
 class LogService:
     __lock = threading.Lock()
+
+    def post_log(self, state, category, content):
+        try:
+            data = {
+                "logName": self.runtime_info["pipeline_name"],
+                "refId": self.pipeline_run_id,
+                "sessionId": self.session_id,
+                "category": "databricks",
+                "subcategory": "workflow" if self.runtime_info["job"] is not None else "notebook",
+                "service": self.runtime_info["host"],
+                "instance": self.runtime_info["cluster"].cluster_id,
+                "state": state,
+                "message": {
+                    "job_id": self.runtime_info["job"].job_id if self.runtime_info["job"] is not None else None,
+                    "job_name": self.runtime_info["job"].settings.name if self.runtime_info["job"] is not None else None,
+                    "task_key": self.runtime_info["task"].task_key if self.runtime_info["task"] is not None else None,
+                    "notebook_path": self.runtime_info["context"]["notebook_path"],
+                    "cluster_name": self.runtime_info["cluster"].cluster_name,
+                    "category": category,
+                    "content": content
+                }
+            }
+            json_data = json.dumps(data)
+            # print(self.runtime_info["config"]["Log"]["LogAPI"])
+            response = requests.post(self.runtime_info["config"]["Log"]["LogAPI"], headers={'Content-Type': 'application/json'}, data=json_data)
+            if response.status_code != 200:
+                print(response.status_code)
+                print(response.json())
+            # print(response.json())
+        except Exception as e:
+            print("Exception:", e)
+            stack_trace = traceback.format_exc()
+            print("Stack trace:", stack_trace)
+
     def log(self, category, content, flush = False):
         if isinstance(content, str):
             content = json.loads(content)
+        self.post_log("Running", category, content)
         content["log_time"] = str(datetime.now())
         content["session_id"] = self.session_id
         self.logs.setdefault(category, []).append(content)
@@ -408,11 +444,12 @@ class LogService:
     log_file:str
     logs:dict
 
-    def __init__(self, session_id, pipeline_run_id, log_path):
+    def __init__(self, session_id, pipeline_run_id, log_path, runtime_info):
         self.session_id = session_id
         self.pipeline_run_id = pipeline_run_id
         self.log_path = log_path
         self.log_file = os.path.join(self.log_path, f"{self.pipeline_run_id}.json")
+        self.runtime_info = runtime_info
         print(f"Log file: {self.log_file}")
         self.logs = self.read_log()
 
@@ -469,6 +506,7 @@ class StreamingListener(StreamingQueryListener):
     def onQueryTerminated(self, event):
         self.metrics.terminate()
         self.logs.log("streaming", {"metrics":self.metrics.as_dict(), "max_load_rows":self.max_load_rows, "continue_status":False or self.metrics.streaming_status == "Stopped"}, True)
+        self.logs.post_log("Finished", "pipeline", {"metrics":self.metrics.as_dict()})
         print(f"stream terminated!")
 
     logs:LogService
@@ -699,7 +737,7 @@ class Pipeline(PipelineCluster):
         if self.last_run.job_run_id and self.last_run.job_run_result in ("FAILED", "TIMEDOUT", "CANCELED"):
             self.logs.log("operations", { "operation": f're-run job:{job_name}' })
             
-            wait_run = self.workspace.jobs.repair_run(self.last_run.job_run_id, latest_repair_id=self.last_run.latest_repair_id, notebook_params=params, rerun_all_failed_tasks=True)
+            wait_run = self.workspace.jobs.repair_run(self.last_run.job_run_id, latest_repair_id=self.last_run.latest_repair_id, job_parameters=params, rerun_all_failed_tasks=True)
             print(f"Re-running the job {job_name} with status {self.last_run.job_run_result}.")
 
             return self.__running(wait_run, timeout)
@@ -718,8 +756,10 @@ class Pipeline(PipelineCluster):
             run = wait_run.result(callback=run_callback, timeout=timedelta(seconds=timeout)) 
         except TimeoutError as ex:
             self.workspace.jobs.cancel_run_and_wait(response["run_id"])
+            self.logs.post_log("Timeout", "pipeline", { "run_id": response["run_id"], "exception": str(ex) })
             raise ex
         except Exception as ex:
+            self.logs.post_log("Exception", "pipeline", { "run_id": response["run_id"], "exception": str(ex) })
             raise ex
         finally:
             run_result = None
@@ -737,6 +777,8 @@ class Pipeline(PipelineCluster):
         print(f"Run job {run.run_name} {run.state.result_state}")
         result_dict = run.as_dict()
         self.logs.log("job_run_results", result_dict)
+        self.logs.post_log(run.state.result_state, "pipeline", result_dict)
+
         self.logs.flush_log()
         return result_dict
 
@@ -767,6 +809,7 @@ class Pipeline(PipelineCluster):
         if self.last_run.job_run_id:
             run = self.repair_run(job_name, params, timeout)
             if run:
+                self.logs.post_log("Start", "pipeline", { "job_name": f'{job_name}', "is_repair": True })
                 return (run, False)
 
         if params is not None and isinstance(params, str):
@@ -776,8 +819,9 @@ class Pipeline(PipelineCluster):
                 params = {}
             params["default_catalog"] = self.default_catalog
         self.logs.log("operations", { "operation": f'run job:{job_name}' })
-        wait_run = self.workspace.jobs.run_now(job_id, notebook_params=params)
+        wait_run = self.workspace.jobs.run_now(job_id, job_parameters=params)
         print(f"Running the job {job_name}.")
+        self.logs.post_log("Start", "pipeline", { "job_name": f'{job_name}', "is_repair": False })
         return (self.__running(wait_run, timeout), self.__check_continue(job_name))
 
     def __read_data(self, source_file, file_format, schema_dir, reader_options = None, column_names = None):
@@ -857,7 +901,8 @@ class Pipeline(PipelineCluster):
             path = streaming_processor
         elif self.task and self.job:
             path = os.path.join(self.config["Data"]["StreamingProcessor"]["Path"], self.job.settings.name, f"{self.task.task_key}")
-
+        else:
+            path = None
         print(f"Streaming processor path: {path}")   
         locals_before = dict(locals())
         # if os.path.exists(path):
@@ -874,7 +919,10 @@ class Pipeline(PipelineCluster):
             # export:ExportResponse = self.workspace.workspace.export(path, format=ExportFormat.SOURCE)
             # decoded_bytes = base64.b64decode(export.content)
             # decoded_string = decoded_bytes.decode("utf-8")
-            exec(self.get_notebook(path))
+            if path:
+                exec(self.get_notebook(path))
+            else:
+                print(f"Streaming processor file not found")
         except Exception as ex:
             print(f"Cannot load streaming processor file: {ex}")
 
@@ -1521,7 +1569,30 @@ process_functions["{field.name}"] = process_{field.name}
             log_folder = os.path.join(log_folder, self.context["notebook_path"].strip('/'))
         log_path = os.path.join(self.config["Log"]["Path"], self.default_catalog if self.default_catalog else "", log_folder)
         print(log_folder)
-        return LogService(self.session_id, self.pipeline_run_id, log_path)
+        runtime_info = { 
+            "pipeline_name": self.pipeline_name,
+            "config":self.config, 
+            "cluster":self.cluster, 
+            "host":self.host, 
+            "workspace_id":self.workspace_id, 
+            "context":self.context, 
+            "job":self.job, 
+            "task":self.task, 
+            "catalog":self.catalog, 
+            "default_catalog": self.default_catalog 
+        }
+        return LogService(self.session_id, self.pipeline_run_id, log_path, runtime_info)
+
+    # spark_session:SparkSession
+    # cluster:ClusterDetails
+    # host:str
+    # workspace_id:str
+    # workspace:WorkspaceClient
+    # api:PipelineAPI
+    # context:dict
+    # job:Optional[Job]
+    # task:Optional[Task]
+    # catalog:str
 
     def __get_last_run(self):
         self.last_run = {}

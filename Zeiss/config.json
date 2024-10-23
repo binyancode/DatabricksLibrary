@@ -37,6 +37,7 @@
         "ReaderOptions": {}
     },
     "Log": {
-        "Path": "/Volumes/evacatalog/workflow/logs/"
+        "Path": "/Volumes/evacatalog/workflow/logs/",
+        "LogAPI": "https://evadcn3fanetfunction8219.chinacloudsites.cn/api/Logs?code=aKpWJD_twc-vMsSxvFv-2FvqrG6y6sSZ-sVp5JEhLZ8PAzFulGhcyQ%3D%3D"
     }
 }
