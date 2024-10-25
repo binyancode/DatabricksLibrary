@@ -73,7 +73,7 @@ class PipelineUtils:
     
     def init_run_params(self):
         params = self.init_common_params(["job_name", "target_table", "source_file", "file_format", "table_alias", \
-                                          "reader_options", "reload_table", "max_load_rows", ("continue_run", "True", "bool"), \
+                                          "reader_options", "column_names", "reload_table", "max_load_rows", ("continue_run", "True", "bool"), \
                                             ("timeout", "3600", "int"), "notebook_path", ("notebook_timeout", "-1", "int")], False)
         # parameter_list = ["pipeline_run_id", "pipeline_name", "job_name", "default_catalog", "target_table", \
         #                   "source_file", "file_format", "table_alias", "reader_options", "reload_table", \
@@ -125,9 +125,9 @@ class PipelineUtils:
 
     def init_common_params(self, parameter_list = None, parse_task_param = True):
         if parameter_list:
-            parameter_list = parameter_list + ["pipeline_run_id", "pipeline_name", "default_catalog", "task_parameters"]
+            parameter_list = parameter_list + ["ref_id", "pipeline_run_id", "pipeline_name", "default_catalog", "task_parameters"]
         else:
-            parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "task_parameters"]
+            parameter_list = ["ref_id", "pipeline_run_id", "pipeline_name", "default_catalog", "task_parameters"]
         params = self.__init_params(parameter_list)
         if parse_task_param:
             params["task_parameters"] = self.parse_task_param(params["task_parameters"])

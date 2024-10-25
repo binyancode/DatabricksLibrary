@@ -360,11 +360,11 @@ class PipelineService:
 class LogService:
     __lock = threading.Lock()
 
-    def post_log(self, state, category, content):
+    def post_log(self, state, type, content):
         try:
             data = {
                 "logName": self.runtime_info["pipeline_name"],
-                "refId": self.pipeline_run_id,
+                "refId": self.runtime_info["ref_id"],
                 "sessionId": self.session_id,
                 "category": "databricks",
                 "subcategory": "workflow" if self.runtime_info["job"] is not None else "notebook",
@@ -372,12 +372,14 @@ class LogService:
                 "instance": self.runtime_info["cluster"].cluster_id,
                 "state": state,
                 "message": {
+                    "pipeline_run_id": self.pipeline_run_id,
+                    "pipeline_name": self.runtime_info["pipeline_name"],
                     "job_id": self.runtime_info["job"].job_id if self.runtime_info["job"] is not None else None,
                     "job_name": self.runtime_info["job"].settings.name if self.runtime_info["job"] is not None else None,
                     "task_key": self.runtime_info["task"].task_key if self.runtime_info["task"] is not None else None,
                     "notebook_path": self.runtime_info["context"]["notebook_path"],
                     "cluster_name": self.runtime_info["cluster"].cluster_name,
-                    "category": category,
+                    "type": type,
                     "content": content
                 }
             }
@@ -508,7 +510,6 @@ class StreamingListener(StreamingQueryListener):
         self.end_time = time.time()
         self.metrics.terminate()
         self.logs.log("streaming", {"metrics":self.metrics.as_dict(), "max_load_rows":self.max_load_rows, "continue_status":False or self.metrics.streaming_status == "Stopped"}, True)
-        self.logs.post_log("Finished", "load_table", {"metrics":self.metrics.as_dict(), "load_duration": self.end_time - self.start_time })
         print(f"stream terminated!")
 
     logs:LogService
@@ -516,11 +517,12 @@ class StreamingListener(StreamingQueryListener):
     progress:Callable[[StreamingMetrics, StreamingQueryProgress, int], None]
     max_load_rows:int
 
-    def __init__(self, logs: LogService, metrics: StreamingMetrics, progress:Callable[[StreamingQueryProgress], None] = None, max_load_rows = -1):
+    def __init__(self, logs: LogService, metrics: StreamingMetrics, progress:Callable[[StreamingQueryProgress], None] = None, max_load_rows = -1, load_table_info = None):
         self.logs = logs
         self.metrics = metrics
         self.progress = progress
         self.max_load_rows = max_load_rows
+        self.load_table_info = load_table_info
 
 class PipelineCluster(PipelineService):
     def _get_job_id(self, job_name:str) -> int:
@@ -758,10 +760,10 @@ class Pipeline(PipelineCluster):
             run = wait_run.result(callback=run_callback, timeout=timedelta(seconds=timeout)) 
         except TimeoutError as ex:
             self.workspace.jobs.cancel_run_and_wait(response["run_id"])
-            self.logs.post_log("Timeout", "run_job", { "run_id": response["run_id"], "exception": str(ex) })
+            self.logs.post_log("Timeout", "run_job", { "response": response, "exception": str(ex) })
             raise ex
         except Exception as ex:
-            self.logs.post_log("Failed", "run_job", { "run_id": response["run_id"], "exception": str(ex) })
+            self.logs.post_log("Failed", "run_job", { "response": response, "exception": str(ex) })
             raise ex
         finally:
             run_result = None
@@ -779,7 +781,20 @@ class Pipeline(PipelineCluster):
         print(f"Run job {run.run_name} {run.state.result_state}")
         result_dict = run.as_dict()
         self.logs.log("job_run_results", result_dict)
-        self.logs.post_log(run.state.result_state, "run_job", result_dict)
+
+        state = {
+            "CANCELED": "Cancelled",
+            "EXCLUDED": "Warning",
+            "FAILED": "Failed",
+            "MAXIMUM_CONCURRENT_RUNS_REACHED": "Warning",
+            "SUCCESS": "Succeeded",
+            "SUCCESS_WITH_FAILURES": "Warning",
+            "TIMEDOUT": "Timeout",
+            "UPSTREAM_CANCELED": "Warning",
+            "UPSTREAM_FAILED": "Warning"
+        }
+
+        self.logs.post_log(state[run.state.result_state.name], "run_job", result_dict)
 
         self.logs.flush_log()
         return result_dict
@@ -811,7 +826,7 @@ class Pipeline(PipelineCluster):
         if self.last_run.job_run_id:
             run = self.repair_run(job_name, params, timeout)
             if run:
-                self.logs.post_log("Start", "run_job", { "job_name": f'{job_name}', "is_repair": True })
+                self.logs.post_log("Running", "run_job", { "job_name": f'{job_name}', "job_params": params, "is_repair": True })
                 return (run, False)
 
         if params is not None and isinstance(params, str):
@@ -823,7 +838,7 @@ class Pipeline(PipelineCluster):
         self.logs.log("operations", { "operation": f'run job:{job_name}' })
         wait_run = self.workspace.jobs.run_now(job_id, job_parameters=params)
         print(f"Running the job {job_name}.")
-        self.logs.post_log("Start", "run_job", { "job_name": f'{job_name}', "is_repair": False })
+        self.logs.post_log("Running", "run_job", { "job_name": f'{job_name}', "is_repair": False })
         return (self.__running(wait_run, timeout), self.__check_continue(job_name))
 
     def __read_data(self, source_file, file_format, schema_dir, reader_options = None, column_names = None):
@@ -1022,10 +1037,20 @@ process_functions["{field.name}"] = process_{field.name}
         print(f"reload_table:{reload_table}")
         print(f"streaming_processor:{streaming_processor}")
 
-
         self.__get_last_load()
 
-        self.__add_streaming_listener(max_load_rows)
+        load_table_info = {
+            "target_table": target_table,
+            "source_file": source_file,
+            "file_format": file_format,
+            "table_alias": table_alias,
+            "reader_options": reader_options,
+            "column_names": column_names,
+            "reload_table": reload_table.name,
+        }
+        self.logs.post_log("Running", "load_table", {"load_table_info": load_table_info })
+
+        self.__add_streaming_listener(max_load_rows, load_table_info)
         #target_table = self.spark_session.sql(f'DESC DETAIL {target_table}').first()["name"]
         catalog = self.__get_catalog(target_table) if not self.default_catalog else self.default_catalog
         print(f"Current catalog:{catalog}")
@@ -1079,6 +1104,7 @@ process_functions["{field.name}"] = process_{field.name}
         if write_transform is not None and callable(write_transform) and len(inspect.signature(write_transform).parameters) == 1:
             df = write_transform(df)
         df = df.partitionBy("_load_id", "_load_time")
+        start_time = time.time()
         df.option("checkpointLocation", checkpoint_dir)\
         .trigger(availableNow=True)\
         .toTable(target_table)
@@ -1087,6 +1113,8 @@ process_functions["{field.name}"] = process_{field.name}
         self.logs.log('operations', { "operation": f'load table:{target_table}' })
         self.logs.flush_log()
         self.__wait_loading_data()
+        end_time = time.time()
+        self.logs.post_log("Succeeded", "load_table", {"metrics":self.streaming_metrics.as_dict(), "load_table_info": load_table_info, "load_duration": end_time - start_time })
         self.logs.flush_log()
         self.logs.log("load_info", { "load_id": load_id, "status": "succeeded", "source_file": source_file, "file_format": file_format, "schema_dir": schema_dir }, True)
         return load_id
@@ -1139,6 +1167,7 @@ process_functions["{field.name}"] = process_{field.name}
         self.logs.log('operations', { "operation": f'load path:{target_path}' })
         self.flush_log()
         self.__wait_loading_data()
+        
         self.view(target_view, target_path, 'delta')
         self.flush_log()
         #self.spark_session.sql(f"CREATE OR REPLACE TEMPORARY VIEW `{target_view}` USING parquet OPTIONS (path '{target_path}')")
@@ -1373,11 +1402,16 @@ process_functions["{field.name}"] = process_{field.name}
             update_columns = source.columns 
         start_time = time.time()
 
+        merge_info = {
+            "mode":mode.name,
+            "target_table": target_table,
+            "table_aliases": table_aliases
+        }
         try:
             self.spark_session.sql(f"SELECT 1 FROM {target_table} LIMIT 1").collect()
         except Exception as ex:
             self.spark_session.sql(f"create table {target_table} as select * from {source_table} where 1=0").collect()
-        merge_result = None
+        merge_result = {}
         try:
             if mode == MergeMode.MergeInto:
                 target = DeltaTable.forName(sparkSession=self.spark_session, tableOrViewName= target_table)
@@ -1445,7 +1479,15 @@ process_functions["{field.name}"] = process_{field.name}
                 merge_result = merge_result[0]     
         
             end_time = time.time()
-            self.logs.post_log("Succeeded", "merge_table", { "mode":mode, "merge_result": merge_result, "merge_duration": end_time - start_time }) 
+
+            result = {
+                "num_affected_rows": merge_result["num_affected_rows"] if "num_affected_rows" in merge_result else 0,
+                "num_updated_rows": merge_result["num_updated_rows"] if "num_updated_rows" in merge_result else 0,
+                "num_deleted_rows": merge_result["num_deleted_rows"] if "num_deleted_rows" in merge_result else 0,
+                "num_inserted_rows": merge_result["num_inserted_rows"] if "num_inserted_rows" in merge_result else 0,
+            }
+
+            self.logs.post_log("Succeeded", "merge_table", { "merge_info":merge_info, "merge_result": result, "merge_duration": end_time - start_time }) 
             print(merge_result)
             #for table in [table for table in self.spark_session.catalog.listTables() if table.isTemporary and table.name=='load_info']:
             load_info_json = []
@@ -1501,7 +1543,7 @@ process_functions["{field.name}"] = process_{field.name}
                                         current_timestamp()
                                 """).collect()
         except Exception as ex:
-            self.logs.post_log("Failed", "merge_table", { "mode":mode, "merge_result":merge_result, "exception": str(ex) }) 
+            self.logs.post_log("Failed", "merge_table", { "merge_info":merge_info, "merge_result":merge_result, "exception": str(ex) }) 
             raise ex
             #[Row(num_affected_rows=10, num_updated_rows=10, num_deleted_rows=0, num_inserted_rows=0)]
 
@@ -1548,9 +1590,9 @@ process_functions["{field.name}"] = process_{field.name}
                 metrics.stop()
                 stream.stop()
 
-    def __add_streaming_listener(self, max_load_rows = -1):
+    def __add_streaming_listener(self, max_load_rows = -1, load_table_info = None):
         if Pipeline.streaming_listener is None:
-            Pipeline.streaming_listener = StreamingListener(self.logs, self.streaming_metrics, self.__streaming_progress, max_load_rows)
+            Pipeline.streaming_listener = StreamingListener(self.logs, self.streaming_metrics, self.__streaming_progress, max_load_rows, load_table_info)
             self.spark_session.streams.addListener(Pipeline.streaming_listener)
             print(f"add {Pipeline.streaming_listener}")
         else:
@@ -1577,6 +1619,7 @@ process_functions["{field.name}"] = process_{field.name}
         log_path = os.path.join(self.config["Log"]["Path"], self.default_catalog if self.default_catalog else "", log_folder)
         print(log_folder)
         runtime_info = { 
+            "ref_id": self.ref_id,
             "pipeline_name": self.pipeline_name,
             "config":self.config, 
             "cluster":self.cluster, 
@@ -1621,9 +1664,9 @@ process_functions["{field.name}"] = process_{field.name}
         self.last_load = SimpleNamespace(**self.last_load)
         print(self.last_load)
 
-    def __init__(self, pipeline_run_id, default_catalog, pipeline_name = None, spark = None):
+    def __init__(self, ref_id, pipeline_run_id, default_catalog, pipeline_name = None, spark = None):
         super().__init__(default_catalog, spark)
-        
+        self.ref_id = ref_id
         self.pipeline_run_id = pipeline_run_id
         self.pipeline_name = pipeline_name
         self.logs = self.__init_logs(self.job, self.task)
