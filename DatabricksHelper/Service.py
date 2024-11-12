@@ -71,10 +71,11 @@ class Reload(IntFlag):
     TRUNCATE_TABLE = 8
 
 class MergeMode(IntFlag):
-    MergeInto = 0
-    DeleteAndInsert = 1
-    MergeOverwrite = 2
-    InsertOverwrite = 3
+    Merge = 0
+    MergeInto = 1
+    DeleteAndInsert = 2
+    MergeOverwrite = 3
+    InsertOverwrite = 4
 
 class DataReader:
     def __init__(self, data, load_id):
@@ -1218,7 +1219,11 @@ process_functions["{field.name}"] = process_{field.name}
             _value.update(value)
             self.databricks_dbutils.jobs.taskValues.set(key = key, value = json.dumps(_value))
 
-
+    #reload_info：{"businesspartner":"evacatalog.temp.businesspartner"}
+    #reload_info：{"businesspartner":"select * from evacatalog.temp.businesspartner"}
+    #reload_info: {"businesspartner":"evacatalog.temp.businesspartner", "condition":"_load_id = 'xxx'"}
+    #rekoad_info: {"businesspartner":{"query":"select * from evacatalog.temp.businesspartner where substring(`_source_metadata`.file_modification_time,1,10) >'2024-10-13'", "batch_size":10000, "partition_size":50}}
+    #task_load_info: {"table": "temp.businesspartner", "view": "businesspartner", "load_id": "c99a7f26-6dcd-47e2-bb45-2bbc6ae0e906"}
     def get_load_info(self, schema = None, debug = None, transform = None, task_load_info = None, reload_info = None, load_option = None):
         #context = self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext()
    
@@ -1413,7 +1418,7 @@ process_functions["{field.name}"] = process_{field.name}
             self.spark_session.sql(f"create table {target_table} as select * from {source_table} where 1=0").collect()
         merge_result = {}
         try:
-            if mode == MergeMode.MergeInto:
+            if mode == MergeMode.Merge:
                 target = DeltaTable.forName(sparkSession=self.spark_session, tableOrViewName= target_table)
                 merge_result = target.alias('target').merge(
                     source.alias('source'),
@@ -1425,7 +1430,26 @@ process_functions["{field.name}"] = process_{field.name}
                 ) \
                 .execute()
                 merge_result = merge_result.first()
-                
+            elif mode == MergeMode.MergeInto:
+                merge_condition = " AND ".join([f"target.{k} = source.{k}" for k in keys])
+
+                update_set_clause = ", ".join([f"target.{k} = source.{k}" for k in update_columns])
+
+                insert_columns_str = ", ".join(insert_columns)
+                insert_values_str = ", ".join([f"source.{k}" for k in insert_columns])
+
+                merge_sql = f"""
+                MERGE INTO {target_table} AS target
+                USING {source_table} AS source
+                ON {merge_condition}
+                WHEN MATCHED THEN
+                    UPDATE SET {update_set_clause}
+                WHEN NOT MATCHED THEN
+                    INSERT ({insert_columns_str})
+                    VALUES ({insert_values_str})
+                """
+
+                merge_result = self.spark_session.sql(merge_sql)           
             elif mode == MergeMode.DeleteAndInsert:
                 target = DeltaTable.forName(sparkSession=self.spark_session, tableOrViewName= target_table)
                 grouping_source = source.groupBy(*keys).count()

@@ -71,7 +71,7 @@ class PipelineUtils:
         return params
     
     
-    def init_run_params(self):
+    def init_run_load_job_params(self):
         params = self.init_common_params(["job_name", "target_table", "source_file", "file_format", "table_alias", \
                                           "reader_options", "column_names", "reload_table", "max_load_rows", ("continue_run", "True", "bool"), \
                                             ("timeout", "3600", "int"), "notebook_path", ("notebook_timeout", "-1", "int")], False)
@@ -105,6 +105,22 @@ class PipelineUtils:
         #parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "notebook_path", ("notebook_timeout", "-1", "int"), "task_load_info", "task_parameters"]
         #params = self.__init_params(parameter_list)
         #params = SimpleNamespace(**params)
+        return params
+    
+    def init_run_common_job_params(self):
+        params = self.init_common_params(["job_name", ("timeout", "3600", "int")], False)
+        # parameter_list = ["pipeline_run_id", "pipeline_name", "job_name", "default_catalog", "target_table", \
+        #                   "source_file", "file_format", "table_alias", "reader_options", "reload_table", \
+        #                     "max_load_rows", ("continue_run", "True", "bool"), ("timeout", "3600", "int"), 
+        #                     "notebook_path", ("notebook_timeout", "-1", "int"), "task_parameters"]
+        # params = self.__init_params(parameter_list)
+        
+        params = vars(params)
+        params["job_params"] = {}
+        for key, value in params.items():
+            if key != "job_params" and value is not None and value != "" and (not isinstance(value, str) or value.strip("{}").strip(" ") != ""):
+                params["job_params"][key] = str(value) if isinstance(value, (int, float, str, bool)) else json.dumps(value)
+        params = SimpleNamespace(**params)
         return params
 
     def init_transform_params(self):
