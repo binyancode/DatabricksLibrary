@@ -20,7 +20,7 @@
                     }
                 }
             ],
-            "MaxParallelTaskCountForEntryCluster": 10
+            "MaxParallelTaskCountForEntryCluster": 20
         }
     },
     "Data": {

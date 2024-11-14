@@ -965,10 +965,13 @@ class Pipeline(PipelineCluster):
             StructField("validation_result", IntegerType(), True),
             StructField("validations", ArrayType(
                 StructType([
-                    StructField("name", StringType(), True),
+                    StructField("id", StringType(), True),
                     StructField("result", IntegerType(), True),
-                    StructField("message", StringType()),
-                    StructField("data", StringType())
+                    StructField("description", StringType()),
+                    StructField("data", StringType()),
+                    StructField("attributes", StringType()),
+                    StructField("priority", StringType()),
+                    StructField("category", StringType())
                 ])
             ), True)
         ])
@@ -992,7 +995,7 @@ class Pipeline(PipelineCluster):
                     else:
                         validations = []
             except Exception as ex:
-                return {"is_valid": False, "validation_result": validation_result, "validations": [{"name":"validation_exception","result":0, "message":str(ex)}]}
+                return {"is_valid": False, "validation_result": validation_result, "validations": [{"id":"-1","result":0, "description":str(ex)}]}
             return {"is_valid": is_valid, "validation_result": validation_result, "validations": validations}
 
         df = df.withColumn("_validations", process_validations(struct([df[col] for col in df.columns])))
