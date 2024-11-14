@@ -100,13 +100,20 @@ class PipelineUtils:
         # params = SimpleNamespace(**params)
         return params
     
-    def init_run_notebook_params(self):
+    def init_run_load_notebook_params(self):
         params = self.init_common_params(["notebook_path", ("notebook_timeout", "-1", "int"), "task_load_info", "reload_info"], False)
         #parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "notebook_path", ("notebook_timeout", "-1", "int"), "task_load_info", "task_parameters"]
         #params = self.__init_params(parameter_list)
         #params = SimpleNamespace(**params)
         return params
     
+    def init_run_common_notebook_params(self):
+        params = self.init_common_params(["notebook_path", ("notebook_timeout", "-1", "int")], False)
+        #parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "notebook_path", ("notebook_timeout", "-1", "int"), "task_load_info", "task_parameters"]
+        #params = self.__init_params(parameter_list)
+        #params = SimpleNamespace(**params)
+        return params
+
     def init_run_common_job_params(self):
         params = self.init_common_params(["job_name", ("timeout", "3600", "int")], False)
         # parameter_list = ["pipeline_run_id", "pipeline_name", "job_name", "default_catalog", "target_table", \

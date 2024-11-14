@@ -1449,16 +1449,31 @@ process_functions["{field.name}"] = process_{field.name}
                     VALUES ({insert_values_str})
                 """
 
-                merge_result = self.spark_session.sql(merge_sql)           
+                merge_result = self.spark_session.sql(merge_sql)   
+                merge_result = merge_result.first()        
             elif mode == MergeMode.DeleteAndInsert:
-                target = DeltaTable.forName(sparkSession=self.spark_session, tableOrViewName= target_table)
-                grouping_source = source.groupBy(*keys).count()
-                merge_result = target.alias('target').merge(
-                    grouping_source.alias('grouping_source'),
-                    " and ".join([f"target.{k} = grouping_source.{k}" for k in keys])
-                ) \
-                .whenMatchedDelete() \
-                .execute()
+                # target = DeltaTable.forName(sparkSession=self.spark_session, tableOrViewName= target_table)
+                # grouping_source = source.groupBy(*keys).count()
+                # merge_result = target.alias('target').merge(
+                #     grouping_source.alias('grouping_source'),
+                #     " and ".join([f"target.{k} = grouping_source.{k}" for k in keys])
+                # ) \
+                # .whenMatchedDelete() \
+                # .execute()
+                temp_source_table = str(uuid.uuid4()).replace('-', '')
+                source.groupBy(*keys).count().createOrReplaceTempView(temp_source_table)
+                merge_condition = " AND ".join([f"target.{k} = grouping_source.{k}" for k in keys])
+
+                merge_sql = f"""
+                MERGE INTO {target_table} AS target
+                USING {temp_source_table} AS grouping_source
+                ON {merge_condition}
+                WHEN MATCHED THEN
+                    DELETE
+                """
+
+                # Execute the dynamic SQL merge statement
+                merge_result = self.spark_session.sql(merge_sql)  
                 merge_result = merge_result.first()
                 source.createOrReplaceTempView("source_table")
                 insert_result = self.spark_session.sql(f"""
