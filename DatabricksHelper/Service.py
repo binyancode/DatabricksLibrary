@@ -89,13 +89,13 @@ class TableLoadingValidationResult:
         self.error_message = error_message
 
 class TableLoadingStreamingProcessor(ABC):
-    def validate(self, row) -> dict:
+    def validate(self, row, task_parameters) -> dict:
         return []
 
     def with_columns(self) -> list:
         return []
 
-    def process_cell(self, row, column_name, validations):
+    def process_cell(self, row, column_name, validations, task_parameters):
         return row[column_name]
 
 class PipelineAPI:
@@ -914,7 +914,7 @@ class Pipeline(PipelineCluster):
         else:
             return source
     
-    def __table_loading_streaming_process(self, df, streaming_processor = None):
+    def __table_loading_streaming_process(self, df, streaming_processor = None, task_parameters = None):
         if streaming_processor:
             path = streaming_processor
         elif self.task and self.job:
@@ -983,7 +983,7 @@ class Pipeline(PipelineCluster):
             validation_result = sys.maxsize
             try:
                 if streaming_processor_obj:
-                    validations = streaming_processor_obj.validate(row)
+                    validations = streaming_processor_obj.validate(row, task_parameters)
                     if validations:
                         if not isinstance(validations, list):
                             validations = [validations]
@@ -995,7 +995,8 @@ class Pipeline(PipelineCluster):
                     else:
                         validations = []
             except Exception as ex:
-                return {"is_valid": False, "validation_result": validation_result, "validations": [{"id":"-1","result":0, "description":str(ex)}]}
+                print(f"Validation error: {ex}")
+                raise ex
             return {"is_valid": is_valid, "validation_result": validation_result, "validations": validations}
 
         df = df.withColumn("_validations", process_validations(struct([df[col] for col in df.columns])))
@@ -1007,8 +1008,8 @@ class Pipeline(PipelineCluster):
                 print(f"{field.name}")
                 func_script = f"""
 @udf({field.dataType})
-def process_{field.name}(row, column_name, validations):
-    return streaming_processor_obj.process_cell(row, column_name, validations)
+def process_{field.name}(row, column_name, validations, task_parameters):
+    return streaming_processor_obj.process_cell(row, column_name, validations, task_parameters)
 
 process_functions["{field.name}"] = process_{field.name}
     """
@@ -1016,11 +1017,11 @@ process_functions["{field.name}"] = process_{field.name}
                 globals_dict["streaming_processor_obj"] = streaming_processor_obj
                 globals_dict["process_functions"] = process_functions
                 exec(func_script, globals_dict)
-                df = df.withColumn(field.name, process_functions[field.name](struct([df[col] for col in df.columns]), lit(field.name), df["_validations"]))
+                df = df.withColumn(field.name, process_functions[field.name](struct([df[col] for col in df.columns]), lit(field.name), df["_validations"], lit(task_parameters)))
 
         return df
 
-    def load_table(self, target_table, source_file, file_format, table_alias = None, reader_options = None, column_names = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1, streaming_processor = None):
+    def load_table(self, target_table, source_file, file_format, table_alias = None, reader_options = None, column_names = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1, streaming_processor = None, task_parameters = None):
         source_file = self.__parse_task_param(source_file)
         target_table = self.__parse_task_param(target_table)
         file_format = self.__parse_task_param(file_format)
@@ -1030,6 +1031,7 @@ process_functions["{field.name}"] = process_{field.name}
         max_load_rows = self.__parse_task_param(max_load_rows)
         reload_table = self.__parse_task_param(reload_table)
         streaming_processor = self.__parse_task_param(streaming_processor)
+        task_parameters = self.__parse_task_param(task_parameters)
 
         print(f"target_table:{target_table}")
         print(f"source_file:{source_file}")
@@ -1040,6 +1042,7 @@ process_functions["{field.name}"] = process_{field.name}
         print(f"transform:{transform}")
         print(f"reload_table:{reload_table}")
         print(f"streaming_processor:{streaming_processor}")
+        print(f"task_parameters:{task_parameters}")
 
         self.__get_last_load()
 
@@ -1099,7 +1102,7 @@ process_functions["{field.name}"] = process_{field.name}
         if read_transform is not None and callable(read_transform) and len(inspect.signature(read_transform).parameters) == 1:
             df = read_transform(df)
 
-        df = self.__table_loading_streaming_process(df, streaming_processor)
+        df = self.__table_loading_streaming_process(df, streaming_processor, task_parameters)
 
         print(df.schema)
         df = df.observe("metrics", count(lit(1)).alias("cnt"), max(lit(load_id)).alias("load_id"))
