@@ -269,9 +269,9 @@ class PipelineService:
                 else:
                     param_dict = param
                 task_key = self.task.task_key
-                if task_key in param_dict:
+                if isinstance(param_dict, dict) and task_key in param_dict:
                     param = param_dict[task_key]
-                    print(f"Parameter:{param}")
+                    #print(f"Parameter:{param}")
                     return param
                 else:
                     return param_dict
@@ -753,52 +753,59 @@ class Pipeline(PipelineCluster):
     def __running(self, wait_run:Wait[Run], timeout = 3600):
         response = wait_run.response.as_dict()
         self.logs.log("job_runs", response, True)
+        run = None
         def run_callback(run_return):
             if run_return.state.life_cycle_state != RunLifeCycleState.RUNNING:
                 result_dict = run_return.as_dict()
                 self.logs.log("job_run_results", result_dict, True)  
+        exception = None
         try:
             run = wait_run.result(callback=run_callback, timeout=timedelta(seconds=timeout)) 
         except TimeoutError as ex:
+            print(f"Timeout: {ex}")
+            exception = ex
             self.workspace.jobs.cancel_run_and_wait(response["run_id"])
             self.logs.post_log("Timeout", "run_job", { "response": response, "exception": str(ex) })
             raise ex
         except Exception as ex:
+            print(f"Failed: {ex}")
+            exception = ex
             self.logs.post_log("Failed", "run_job", { "response": response, "exception": str(ex) })
             raise ex
         finally:
-            run_result = None
-            if 'run' in locals():
-                run_result = run
-            elif "run_id" in response:
-                run_result =self.workspace.jobs.get_run(response["run_id"])    
-            if run_result:
-                run_result = run_result.as_dict()
+            if not run:
+                if "run_id" in response:
+                    run = self.workspace.jobs.get_run(response["run_id"])
+                elif self.last_run.job_run_id:
+                    run = self.workspace.jobs.get_run(self.last_run.job_run_id)
+            if run:
+                run_result = run.as_dict()
+                print(f"Run job {run.run_name} {run.state.result_state}")
                 print("job:", run_result["run_name"], run_result["state"]["result_state"], run_result["run_page_url"])
                 for task in run_result["tasks"]:
                     print("task:", task["task_key"], task["state"]["result_state"], task["run_page_url"])
+            
+                self.logs.log("job_run_results", run_result)
+                state = {
+                    "CANCELED": "Cancelled",
+                    "EXCLUDED": "Warning",
+                    "FAILED": "Failed",
+                    "MAXIMUM_CONCURRENT_RUNS_REACHED": "Warning",
+                    "SUCCESS": "Succeeded",
+                    "SUCCESS_WITH_FAILURES": "Warning",
+                    "TIMEDOUT": "Timeout",
+                    "UPSTREAM_CANCELED": "Warning",
+                    "UPSTREAM_FAILED": "Warning"
+                }
+                self.logs.post_log(state[run.state.result_state.name], "run_job", run_result)
+                self.logs.flush_log()
+                if state[run.state.result_state.name] in ["Failed", "Cancelled"]:
+                    raise Exception(f"Job run failed: {run_result}")
+                return run_result
+            elif exception:
+                raise exception
             else:
-                print("run_result is None:", response)
-        print(f"Run job {run.run_name} {run.state.result_state}")
-        result_dict = run.as_dict()
-        self.logs.log("job_run_results", result_dict)
-
-        state = {
-            "CANCELED": "Cancelled",
-            "EXCLUDED": "Warning",
-            "FAILED": "Failed",
-            "MAXIMUM_CONCURRENT_RUNS_REACHED": "Warning",
-            "SUCCESS": "Succeeded",
-            "SUCCESS_WITH_FAILURES": "Warning",
-            "TIMEDOUT": "Timeout",
-            "UPSTREAM_CANCELED": "Warning",
-            "UPSTREAM_FAILED": "Warning"
-        }
-
-        self.logs.post_log(state[run.state.result_state.name], "run_job", result_dict)
-
-        self.logs.flush_log()
-        return result_dict
+                raise Exception("run_result is None:", response)
 
     def run(self, job_name:str, params:dict = None, continue_run = True, timeout = 3600, continue_callback:Callable[[dict, dict, int], bool] = None):
         self.__get_last_run()
@@ -971,7 +978,8 @@ class Pipeline(PipelineCluster):
                     StructField("data", StringType()),
                     StructField("attributes", StringType()),
                     StructField("priority", StringType()),
-                    StructField("category", StringType())
+                    StructField("category", StringType()),
+                    StructField("properties", MapType(StringType(), StringType()))
                 ])
             ), True)
         ])
@@ -1028,7 +1036,7 @@ process_functions["{field.name}"] = process_{field.name}
         table_alias = self.__parse_task_param(table_alias)
         reader_options = self.__parse_task_param(reader_options)
         column_names = self.__parse_task_param(column_names)
-        max_load_rows = self.__parse_task_param(max_load_rows)
+        max_load_rows = int(self.__parse_task_param(max_load_rows))
         reload_table = self.__parse_task_param(reload_table)
         streaming_processor = self.__parse_task_param(streaming_processor)
         task_parameters = self.__parse_task_param(task_parameters)
@@ -1039,6 +1047,7 @@ process_functions["{field.name}"] = process_{field.name}
         print(f"table_alias:{table_alias}")
         print(f"reader_options:{reader_options}")
         print(f"column_names:{column_names}")
+        print(f"max_load_rows:{max_load_rows}")
         print(f"transform:{transform}")
         print(f"reload_table:{reload_table}")
         print(f"streaming_processor:{streaming_processor}")
@@ -1053,6 +1062,7 @@ process_functions["{field.name}"] = process_{field.name}
             "table_alias": table_alias,
             "reader_options": reader_options,
             "column_names": column_names,
+            "max_load_rows": max_load_rows,
             "reload_table": reload_table.name,
         }
         self.logs.post_log("Running", "load_table", {"load_table_info": load_table_info })

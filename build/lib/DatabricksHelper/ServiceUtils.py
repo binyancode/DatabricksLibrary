@@ -92,7 +92,7 @@ class PipelineUtils:
     def init_load_params(self):
         params = self.init_common_params(["target_table","source_file", "file_format", "table_alias", \
                                           ("reader_options","{}","json.loads"), "column_names", ("reload_table", "Reload.DEFAULT"), \
-                                            ("max_load_rows", "-1", "int"), "validation"], False)
+                                            "max_load_rows", "validation"], False)
         # parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "target_table", \
         #                   "source_file", "file_format", "table_alias", ("reader_options","{}","json.loads"), \
         #                     ("reload_table", "Reload.DEFAULT"), ("max_load_rows", "-1", "int"), "validation", "task_parameters"]
