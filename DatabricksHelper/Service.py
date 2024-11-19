@@ -962,11 +962,16 @@ class Pipeline(PipelineCluster):
                 importlib.import_module(module_name)
             else:
                 streaming_processor_module = sys.modules[module_name]
-            for name, type in inspect.getmembers(streaming_processor_module, inspect.isclass):
-                if issubclass(type, TableLoadingStreamingProcessor) and type is not TableLoadingStreamingProcessor:
-                    streaming_processor_type = type
-                    streaming_processor_obj = streaming_processor_type()
-                    return streaming_processor_obj
+            
+            if hasattr(streaming_processor_module, 'streaming_processor_object'):
+                return streaming_processor_module.streaming_processor_object
+            else:
+                for name, type in inspect.getmembers(streaming_processor_module, inspect.isclass):
+                    if issubclass(type, TableLoadingStreamingProcessor) and type is not TableLoadingStreamingProcessor:
+                        streaming_processor_module.streaming_processor_object = type()
+                        streaming_processor_module.streaming_processor_object.init()
+                        print(f"Streaming processor object loaded: {streaming_processor_module.streaming_processor_object}")
+                        return streaming_processor_module.streaming_processor_object
         return None
 
     def __table_loading_streaming_process(self, df, streaming_processor = None, task_parameters = None):
@@ -1014,13 +1019,12 @@ class Pipeline(PipelineCluster):
         #     elif tp is not TableLoadingStreamingProcessor:
         #         globals_dict[name] = tp
         #         print(f"Global object registered: {name}, {tp}")
-        streaming_processor_obj = None
-        init_obj = None
+
         notebook_code = self.get_notebook(path)
         streaming_processor_obj = Pipeline.__get_streaming_processor_object(notebook_code)
-        if streaming_processor_obj:
-            init_obj = streaming_processor_obj.init()
-            print(f"Streaming processor object loaded: {streaming_processor_obj}")
+        # if streaming_processor_obj:
+        #     init_obj = streaming_processor_obj.init()
+        #     print(f"Streaming processor object loaded: {streaming_processor_obj}")
 
         # module_name = "streaming_processor_module"
         # if module_name not in sys.modules:
@@ -1084,7 +1088,7 @@ class Pipeline(PipelineCluster):
             validation_result = sys.maxsize
             try:
                 if streaming_processor_obj:
-                    validations = streaming_processor_obj.validate(row, task_parameters, init_obj)
+                    validations = streaming_processor_obj.validate(row, task_parameters)
                     if validations:
                         if not isinstance(validations, list):
                             validations = [validations]
