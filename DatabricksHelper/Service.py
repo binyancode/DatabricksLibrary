@@ -1,4 +1,5 @@
 import importlib
+import importlib.util
 from typing import Tuple
 
 def check_class_in_module(module_name, class_name):
@@ -62,6 +63,28 @@ import base64
 import csv
 import io
 import traceback
+import types
+
+# def get_spark_id():
+#     import IPython
+#     spark_session = IPython.get_ipython().user_ns["spark"]
+#     return id(spark_session)
+
+# def import_streaming_processor_module(module_name):
+#     try:
+#         file_path = f"/Volumes/evacatalog/workflow/logs/{module_name}.py"
+#         if os.path.exists(file_path):
+#             spec = importlib.util.spec_from_file_location(module_name, file_path)
+#             module = importlib.util.module_from_spec(spec)
+#             sys.modules[module_name] = module
+#             spec.loader.exec_module(module)
+#             module = importlib.import_module(module_name)
+#     except ImportError:
+#         pass
+
+# streaming_processor_module_name = f"streaming_processor_module"
+# import_streaming_processor_module(streaming_processor_module_name)
+
 
 class Reload(IntFlag):
     DEFAULT = 0
@@ -89,6 +112,9 @@ class TableLoadingValidationResult:
         self.error_message = error_message
 
 class TableLoadingStreamingProcessor(ABC):
+    def init():
+        pass
+
     def validate(self, row, task_parameters) -> dict:
         return []
 
@@ -924,7 +950,25 @@ class Pipeline(PipelineCluster):
                 return source    
         else:
             return source
-    
+        
+    def __get_streaming_processor_object(code):
+        if code:
+            module_name = "streaming_processor_module"
+            streaming_processor_module = None
+            if module_name not in sys.modules:
+                streaming_processor_module = types.ModuleType(module_name)
+                exec(code, streaming_processor_module.__dict__)
+                sys.modules[module_name] = streaming_processor_module
+                importlib.import_module(module_name)
+            else:
+                streaming_processor_module = sys.modules[module_name]
+            for name, type in inspect.getmembers(streaming_processor_module, inspect.isclass):
+                if issubclass(type, TableLoadingStreamingProcessor) and type is not TableLoadingStreamingProcessor:
+                    streaming_processor_type = type
+                    streaming_processor_obj = streaming_processor_type()
+                    return streaming_processor_obj
+        return None
+
     def __table_loading_streaming_process(self, df, streaming_processor = None, task_parameters = None):
         if streaming_processor:
             path = streaming_processor
@@ -933,38 +977,75 @@ class Pipeline(PipelineCluster):
         else:
             path = None
         print(f"Streaming processor path: {path}")   
-        locals_before = dict(locals())
-        # if os.path.exists(path):
-        #     with open(path, 'r') as file:
-        #         # globals_dict = globals()
-        #         # globals_dict['TableLoadingValidation'] = TableLoadingValidation
-        #         exec(file.read())
-        #         print(f"Streaming processor file loaded")
+        # locals_before = dict(locals())
+        # # if os.path.exists(path):
+        # #     with open(path, 'r') as file:
+        # #         # globals_dict = globals()
+        # #         # globals_dict['TableLoadingValidation'] = TableLoadingValidation
+        # #         exec(file.read())
+        # #         print(f"Streaming processor file loaded")
+        # # try:
+        # #     self.run_notebook(path)
+        # # except Exception as ex:
+        # #     print(f"Cannot load streaming processor file: {ex}")
+        # streaming_processor_obj = None
         # try:
-        #     self.run_notebook(path)
+        #     # export:ExportResponse = self.workspace.workspace.export(path, format=ExportFormat.SOURCE)
+        #     # decoded_bytes = base64.b64decode(export.content)
+        #     # decoded_string = decoded_bytes.decode("utf-8")
+        #     if path:
+        #         #print(notebook)
+        #         exec(notebook_code)
+        #     else:
+        #         print(f"Streaming processor file not found")
         # except Exception as ex:
         #     print(f"Cannot load streaming processor file: {ex}")
-        try:
-            # export:ExportResponse = self.workspace.workspace.export(path, format=ExportFormat.SOURCE)
-            # decoded_bytes = base64.b64decode(export.content)
-            # decoded_string = decoded_bytes.decode("utf-8")
-            if path:
-                exec(self.get_notebook(path))
-            else:
-                print(f"Streaming processor file not found")
-        except Exception as ex:
-            print(f"Cannot load streaming processor file: {ex}")
 
-        locals_after = dict(locals())
-        new_locals = {k: v for k, v in locals_after.items() if k not in locals_before}
-        new_classes = {name: obj for name, obj in new_locals.items() if isinstance(obj, (type))}
+        # locals_after = dict(locals())
+        # new_locals = {k: v for k, v in locals_after.items() if k not in locals_before}
+        # new_classes = {name: obj for name, obj in new_locals.items() if isinstance(obj, (type)) or callable(obj)}
 
+        # streaming_processor_type = None
+        # streaming_processor_obj = None
+        # globals_dict = globals()
+        # for name, tp in new_classes.items():
+        #     if isinstance(tp, (type)) and issubclass(tp, TableLoadingStreamingProcessor) and tp is not TableLoadingStreamingProcessor:
+        #         streaming_processor_type = tp
+        #     elif tp is not TableLoadingStreamingProcessor:
+        #         globals_dict[name] = tp
+        #         print(f"Global object registered: {name}, {tp}")
         streaming_processor_obj = None
-        for name, tp in new_classes.items():
-            if issubclass(tp, TableLoadingStreamingProcessor) and tp is not TableLoadingStreamingProcessor:
-                streaming_processor_obj = tp()
-                print(f"Streaming processor object loaded: {streaming_processor_obj}")
-        
+        init_obj = None
+        notebook_code = self.get_notebook(path)
+        streaming_processor_obj = Pipeline.__get_streaming_processor_object(notebook_code)
+        if streaming_processor_obj:
+            init_obj = streaming_processor_obj.init()
+            print(f"Streaming processor object loaded: {streaming_processor_obj}")
+
+        # module_name = "streaming_processor_module"
+        # if module_name not in sys.modules:
+        #     streaming_processor_module = types.ModuleType(module_name)
+        #     exec(notebook_code, streaming_processor_module.__dict__)
+        #     sys.modules[module_name] = streaming_processor_module
+        #     importlib.import_module(module_name)
+
+        # module_name = streaming_processor_module_name
+        # with open(f"/Volumes/evacatalog/workflow/logs/{module_name}.py", 'w') as file:
+        #     file.write(notebook_code)
+        # spec = importlib.util.spec_from_file_location(module_name, f"/Volumes/evacatalog/workflow/logs/{module_name}.py")
+        # module = importlib.util.module_from_spec(spec)
+        # sys.modules[module_name] = module
+        # spec.loader.exec_module(module)
+        # importlib.import_module(module_name)
+        # for name, obj in inspect.getmembers(module, inspect.isclass):
+        #     if issubclass(obj, TableLoadingStreamingProcessor) and obj is not TableLoadingStreamingProcessor:
+        #         streaming_processor_type = obj
+
+
+        # if streaming_processor_type:
+        #     streaming_processor_obj = streaming_processor_type()
+        #     streaming_processor_obj.init()
+        #     print(f"Streaming processor object loaded: {streaming_processor_obj}")
         # for name, obj in globals().items():
         #     if isinstance(obj, type):  # 确保是一个类
         #         if issubclass(obj, TableLoadingValidation) and obj is not TableLoadingValidation:  # 检查是否是A的子类，排除A本身
@@ -988,18 +1069,25 @@ class Pipeline(PipelineCluster):
             ), True)
         ])
         
+
         @udf(validation_schema)
         def process_validations(row):
+            # module_name = "streaming_processor_module"
+            # if module_name not in sys.modules:
+            #     streaming_processor_module = types.ModuleType(module_name)
+            #     exec(notebook_code, streaming_processor_module.__dict__)
+            #     sys.modules[module_name] = streaming_processor_module
+            #     importlib.import_module(module_name)
+            streaming_processor_obj = Pipeline.__get_streaming_processor_object(notebook_code)
             is_valid = True
             validations = []
             validation_result = sys.maxsize
             try:
                 if streaming_processor_obj:
-                    validations = streaming_processor_obj.validate(row, task_parameters)
+                    validations = streaming_processor_obj.validate(row, task_parameters, init_obj)
                     if validations:
                         if not isinstance(validations, list):
                             validations = [validations]
-
                         for validation in validations:
                             if validation["result"] < 0:
                                 is_valid = False
