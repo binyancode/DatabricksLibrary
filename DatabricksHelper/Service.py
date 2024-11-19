@@ -970,7 +970,7 @@ class Pipeline(PipelineCluster):
                     if issubclass(type, TableLoadingStreamingProcessor) and type is not TableLoadingStreamingProcessor:
                         streaming_processor_module.streaming_processor_object = type()
                         streaming_processor_module.streaming_processor_object.init()
-                        print(f"Streaming processor object loaded: {streaming_processor_module.streaming_processor_object}")
+                        print(f"Streaming processor object loaded: {name} {streaming_processor_module.streaming_processor_object}")
                         return streaming_processor_module.streaming_processor_object
         return None
 
