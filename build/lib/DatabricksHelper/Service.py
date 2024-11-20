@@ -36,7 +36,7 @@ else:
 
 #from databricks.sdk.service.compute import ClusterDetails, ClusterSpec, Library, PythonPyPiLibrary 
 #from databricks.sdk.service.jobs import Run, Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, JobCluster, JobSettings, NotebookTask
-from pyspark.sql.functions import explode, col, lit, count, max, from_json, udf, struct
+from pyspark.sql.functions import explode, col, lit, count, max, from_json, udf, struct, approx_count_distinct
 from pyspark.sql.types import *
 from pyspark.sql import Row, DataFrame, Observation, SparkSession
 from pyspark.sql.streaming import StreamingQueryListener, StreamingQuery
@@ -484,6 +484,7 @@ class LogService:
 
 class StreamingMetrics:
     row_count:int = 0
+    file_count:int = 0
     streaming_status:str = "Running" #Running, Finished, Stopped
     life_cycle_status:str = "Running" #Running, Finished, Terminated
     __lock = threading.Lock()
@@ -511,6 +512,12 @@ class StreamingMetrics:
             self.row_count += cnt
         finally:
             self.__lock.release()
+    def set_file_count(self, cnt):
+        self.__lock.acquire()
+        try:
+            self.file_count = cnt
+        finally:
+            self.__lock.release()
     def as_dict(self):
         return {"row_count":self.row_count, "streaming_status": self.streaming_status, "life_cycle_status": self.life_cycle_status}
 
@@ -527,7 +534,8 @@ class StreamingListener(StreamingQueryListener):
             print(f"{row.load_id}-{row.cnt} rows processed!")
 
             self.metrics.add_row_count(row.cnt)
-            print(f"{datetime.now(timezone.utc).replace(microsecond=0).strftime('%Y-%m-%d %H:%M:%S')} Processed row count: {self.metrics.row_count}")
+            self.metrics.set_file_count(row.file_cnt)
+            print(f"{datetime.now(timezone.utc).replace(microsecond=0).strftime('%Y-%m-%d %H:%M:%S')} Processed row count: {self.metrics.row_count}/{self.metrics.file_count}")
             if self.progress is not None:
                 self.progress(self.metrics, event.progress, self.max_load_rows)
             self.logs.log("streaming", {"metrics":self.metrics.as_dict(), "max_load_rows":self.max_load_rows, "continue_status":False or self.metrics.streaming_status == "Stopped"}, True)
@@ -968,9 +976,10 @@ class Pipeline(PipelineCluster):
             else:
                 for name, type in inspect.getmembers(streaming_processor_module, inspect.isclass):
                     if issubclass(type, TableLoadingStreamingProcessor) and type is not TableLoadingStreamingProcessor:
-                        streaming_processor_module.streaming_processor_object = type()
-                        streaming_processor_module.streaming_processor_object.init()
-                        print(f"Streaming processor object loaded: {streaming_processor_module.streaming_processor_object}")
+                        streaming_processor_object = type()
+                        streaming_processor_object.init()
+                        streaming_processor_module.streaming_processor_object = streaming_processor_object
+                        print(f"Streaming processor object loaded: {name} {streaming_processor_object}")
                         return streaming_processor_module.streaming_processor_object
         return None
 
@@ -1019,8 +1028,9 @@ class Pipeline(PipelineCluster):
         #     elif tp is not TableLoadingStreamingProcessor:
         #         globals_dict[name] = tp
         #         print(f"Global object registered: {name}, {tp}")
-
-        notebook_code = self.get_notebook(path)
+        notebook_code = None
+        if os.path.exists(path):
+            notebook_code = self.get_notebook(path)
         streaming_processor_obj = Pipeline.__get_streaming_processor_object(notebook_code)
         # if streaming_processor_obj:
         #     init_obj = streaming_processor_obj.init()
@@ -1211,7 +1221,7 @@ process_functions["{field.name}"] = process_{field.name}
         df = self.__table_loading_streaming_process(df, streaming_processor, task_parameters)
 
         print(df.schema)
-        df = df.observe("metrics", count(lit(1)).alias("cnt"), max(lit(load_id)).alias("load_id"))
+        df = df.observe("metrics", count(lit(1)).alias("cnt"), max(lit(load_id)).alias("load_id"), approx_count_distinct(col("_source_metadata.file_path")).alias("file_cnt"))
         df = df.writeStream
 
         if write_transform is not None and callable(write_transform) and len(inspect.signature(write_transform).parameters) == 1:
