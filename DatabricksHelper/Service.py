@@ -916,12 +916,12 @@ class Pipeline(PipelineCluster):
             new_column_names = next(column_reader)
 
             df = df.toDF(*new_column_names + df.columns[len(new_column_names):])
- 
+        load_time = datetime.now()
         df = df.withColumn("_source_metadata",col("_metadata")) \
         .withColumn("_load_id",lit(load_id)) \
-        .withColumn("_load_time",lit(datetime.now())) 
+        .withColumn("_load_time",lit(load_time)) 
 
-        reader = DataReader(df, load_id)
+        reader = DataReader(df, load_id, load_time)
         return reader
 
     def __get_catalog(self, target_table):
@@ -1203,6 +1203,7 @@ process_functions["{field.name}"] = process_{field.name}
         reader = self.__read_data(source_file, file_format, schema_dir, reader_options, column_names)
         df = reader.data
         load_id = reader.load_id
+        load_time = reader.load_time
         #.selectExpr("*", "_metadata as source_metadata")
         #:Callable[[DataFrame], DataFrame]
         read_transform = None
@@ -1232,7 +1233,7 @@ process_functions["{field.name}"] = process_{field.name}
         .trigger(availableNow=True)\
         .toTable(target_table)
         #query.stop()
-        self.__set_task_value("task_load_info", {"table":target_table, "view": table_alias, "load_id":load_id})
+        self.__set_task_value("task_load_info", {"table":target_table, "view": table_alias, "load_id":load_id, "load_time":load_time})
         self.logs.log('operations', { "operation": f'load table:{target_table}' })
         self.logs.flush_log()
         self.__wait_loading_data()
@@ -1740,7 +1741,7 @@ process_functions["{field.name}"] = process_{field.name}
     def __streaming_progress(self, metrics: StreamingMetrics, progress: StreamingQueryProgress, max_load_rows):
         if max_load_rows < 0:
             return
-        if metrics.row_count >= max_load_rows:
+        if metrics.row_count >= max_load_rows and metrics.file_count >= max_load_rows:
             if not self.spark_session:
                 self._init_databricks()
             for stream in self.spark_session.streams.active:
