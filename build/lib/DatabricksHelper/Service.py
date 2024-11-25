@@ -101,9 +101,10 @@ class MergeMode(IntFlag):
     InsertOverwrite = 4
 
 class DataReader:
-    def __init__(self, data, load_id):
+    def __init__(self, data, load_id, load_time):
         self.data = data
         self.load_id = load_id
+        self.load_time = load_time
 
 class TableLoadingValidationResult:
     def __init__(self, rule_name:str, validation_result:int, error_message:str):
@@ -112,17 +113,19 @@ class TableLoadingValidationResult:
         self.error_message = error_message
 
 class TableLoadingStreamingProcessor(ABC):
-    def init():
+    def init(self, task_parameters, *args, **kwargs):
         pass
 
-    def validate(self, row, task_parameters) -> dict:
+    def validate(self, row) -> dict:
         return []
 
     def with_columns(self) -> list:
         return []
 
-    def process_cell(self, row, column_name, validations, task_parameters):
+    def process_cell(self, row, column_name, validations):
         return row[column_name]
+    
+        
 
 class PipelineAPI:
     def request(self, method, path, data = None, headers = None):
@@ -916,12 +919,12 @@ class Pipeline(PipelineCluster):
             new_column_names = next(column_reader)
 
             df = df.toDF(*new_column_names + df.columns[len(new_column_names):])
- 
+        load_time = datetime.now()
         df = df.withColumn("_source_metadata",col("_metadata")) \
         .withColumn("_load_id",lit(load_id)) \
-        .withColumn("_load_time",lit(datetime.now())) 
+        .withColumn("_load_time",lit(load_time)) 
 
-        reader = DataReader(df, load_id)
+        reader = DataReader(df, load_id, load_time)
         return reader
 
     def __get_catalog(self, target_table):
@@ -959,7 +962,7 @@ class Pipeline(PipelineCluster):
         else:
             return source
         
-    def __get_streaming_processor_object(code):
+    def __get_streaming_processor_object(code, task_parameters = None):
         if code:
             module_name = "streaming_processor_module"
             streaming_processor_module = None
@@ -977,7 +980,7 @@ class Pipeline(PipelineCluster):
                 for name, type in inspect.getmembers(streaming_processor_module, inspect.isclass):
                     if issubclass(type, TableLoadingStreamingProcessor) and type is not TableLoadingStreamingProcessor:
                         streaming_processor_object = type()
-                        streaming_processor_object.init()
+                        streaming_processor_object.init(task_parameters)
                         streaming_processor_module.streaming_processor_object = streaming_processor_object
                         print(f"Streaming processor object loaded: {name} {streaming_processor_object}")
                         return streaming_processor_module.streaming_processor_object
@@ -1031,7 +1034,7 @@ class Pipeline(PipelineCluster):
         notebook_code = None
         if os.path.exists(path):
             notebook_code = self.get_notebook(path)
-        streaming_processor_obj = Pipeline.__get_streaming_processor_object(notebook_code)
+        streaming_processor_obj = Pipeline.__get_streaming_processor_object(notebook_code, task_parameters)
         # if streaming_processor_obj:
         #     init_obj = streaming_processor_obj.init()
         #     print(f"Streaming processor object loaded: {streaming_processor_obj}")
@@ -1092,13 +1095,13 @@ class Pipeline(PipelineCluster):
             #     exec(notebook_code, streaming_processor_module.__dict__)
             #     sys.modules[module_name] = streaming_processor_module
             #     importlib.import_module(module_name)
-            streaming_processor_obj = Pipeline.__get_streaming_processor_object(notebook_code)
+            streaming_processor_obj = Pipeline.__get_streaming_processor_object(notebook_code, task_parameters)
             is_valid = True
             validations = []
             validation_result = sys.maxsize
             try:
                 if streaming_processor_obj:
-                    validations = streaming_processor_obj.validate(row, task_parameters)
+                    validations = streaming_processor_obj.validate(row)
                     if validations:
                         if not isinstance(validations, list):
                             validations = [validations]
@@ -1110,7 +1113,8 @@ class Pipeline(PipelineCluster):
                         validations = []
             except Exception as ex:
                 print(f"Validation error: {ex}")
-                raise ex
+                error_trace = traceback.format_exc()
+                raise RuntimeError(error_trace) from ex
             return {"is_valid": is_valid, "validation_result": validation_result, "validations": validations}
 
         df = df.withColumn("_validations", process_validations(struct([df[col] for col in df.columns])))
@@ -1122,8 +1126,9 @@ class Pipeline(PipelineCluster):
                 print(f"{field.name}")
                 func_script = f"""
 @udf({field.dataType})
-def process_{field.name}(row, column_name, validations, task_parameters):
-    return streaming_processor_obj.process_cell(row, column_name, validations, task_parameters)
+def process_{field.name}(row, column_name, validations):
+    streaming_processor_obj = Pipeline.__get_streaming_processor_object(notebook_code, task_parameters)
+    return streaming_processor_obj.process_cell(row, column_name, validations)
 
 process_functions["{field.name}"] = process_{field.name}
     """
@@ -1131,7 +1136,7 @@ process_functions["{field.name}"] = process_{field.name}
                 globals_dict["streaming_processor_obj"] = streaming_processor_obj
                 globals_dict["process_functions"] = process_functions
                 exec(func_script, globals_dict)
-                df = df.withColumn(field.name, process_functions[field.name](struct([df[col] for col in df.columns]), lit(field.name), df["_validations"], lit(task_parameters)))
+                df = df.withColumn(field.name, process_functions[field.name](struct([df[col] for col in df.columns]), lit(field.name), df["_validations"]))
 
         return df
 
@@ -1203,6 +1208,7 @@ process_functions["{field.name}"] = process_{field.name}
         reader = self.__read_data(source_file, file_format, schema_dir, reader_options, column_names)
         df = reader.data
         load_id = reader.load_id
+        load_time = reader.load_time
         #.selectExpr("*", "_metadata as source_metadata")
         #:Callable[[DataFrame], DataFrame]
         read_transform = None
@@ -1232,7 +1238,7 @@ process_functions["{field.name}"] = process_{field.name}
         .trigger(availableNow=True)\
         .toTable(target_table)
         #query.stop()
-        self.__set_task_value("task_load_info", {"table":target_table, "view": table_alias, "load_id":load_id})
+        self.__set_task_value("task_load_info", {"table":target_table, "view": table_alias, "load_id":load_id, "load_time":str(load_time)})
         self.logs.log('operations', { "operation": f'load table:{target_table}' })
         self.logs.flush_log()
         self.__wait_loading_data()
@@ -1505,7 +1511,7 @@ process_functions["{field.name}"] = process_{field.name}
     def set_default_catalog(self, catalog):
         self.spark_session.catalog.setCurrentCatalog(catalog)
 
-    def merge_table(self, table_aliases, target_table: str, source_table: Union[str, DataFrame], keys, mode: MergeMode, merge_overwrite_no_match = None, source_script = None, schema = "workflow", insert_columns = None, update_columns = None, state = 'succeeded'):
+    def merge_table(self, table_aliases, target_table: str, source_table: Union[str, DataFrame], keys, mode: MergeMode, merge_overwrite_no_match = None, source_script = None, schema = "workflow", insert_columns = None, update_columns = None, keep_columns = None, state = 'succeeded'):
         if source_table and isinstance(source_table, str):
             source = self.spark_session.table(source_table)
         elif source_table and isinstance(source_table, DataFrame):
@@ -1527,6 +1533,7 @@ process_functions["{field.name}"] = process_{field.name}
 
         if not update_columns:
             update_columns = source.columns 
+        
         start_time = time.time()
 
         merge_info = {
@@ -1541,6 +1548,8 @@ process_functions["{field.name}"] = process_{field.name}
         merge_result = {}
         try:
             if mode == MergeMode.Merge:
+                if keep_columns:
+                    update_columns = [column for column in update_columns if column not in keep_columns]
                 target = DeltaTable.forName(sparkSession=self.spark_session, tableOrViewName= target_table)
                 merge_result = target.alias('target').merge(
                     source.alias('source'),
@@ -1553,6 +1562,8 @@ process_functions["{field.name}"] = process_{field.name}
                 .execute()
                 merge_result = merge_result.first()
             elif mode == MergeMode.MergeInto:
+                if keep_columns:
+                    update_columns = [column for column in update_columns if column not in keep_columns]
                 merge_condition = " AND ".join([f"target.{k} = source.{k}" for k in keys])
 
                 update_set_clause = ", ".join([f"target.{k} = source.{k}" for k in update_columns])
@@ -1740,7 +1751,7 @@ process_functions["{field.name}"] = process_{field.name}
     def __streaming_progress(self, metrics: StreamingMetrics, progress: StreamingQueryProgress, max_load_rows):
         if max_load_rows < 0:
             return
-        if metrics.row_count >= max_load_rows:
+        if metrics.row_count >= max_load_rows and metrics.file_count >= max_load_rows:
             if not self.spark_session:
                 self._init_databricks()
             for stream in self.spark_session.streams.active:
