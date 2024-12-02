@@ -1539,7 +1539,8 @@ process_functions["{field.name}"] = process_{field.name}
                 .option("mergeSchema", "true") \
                 .partitionBy("_load_id", "_load_time") \
                 .saveAsTable(f"{self.default_catalog}.{transform_schema}.{temp_view}")
-                temp_df = self.spark_session.table(f"{self.default_catalog}.{transform_schema}.{temp_view}")
+                load_id = all_load_info[f"__{temp_view}_info"].load_id
+                temp_df = self.spark_session.sql(f"select * from {self.default_catalog}.{transform_schema}.{temp_view} where _load_id = '{load_id}'")
                 temp_df.createOrReplaceTempView(temp_view)
                 all_load_info[temp_view] = temp_df
         #如果有validation，路径为task_key/temp_view
