@@ -10,13 +10,13 @@
                     "availability": "ON_DEMAND_AZURE",
                     "spot_bid_max_price": -1
                 },
-                "node_type_id": "Standard_D4ds_v5",
+                "node_type_id": "Standard_F8s_v2",
                 "spark_env_vars": {
                     "DATABRICKS_CONFIG": "/Volumes/evacatalog/workflow/config/config.json"
                 },
                 "enable_elastic_disk": true,
                 "data_security_mode": "USER_ISOLATION",
-                "runtime_engine": "PHOTON",
+                "runtime_engine": "STANDARD",
                 "num_workers": 1
             }
         }
@@ -25,8 +25,6 @@
         "load_bp": "Job_cluster001",
         "transform_bp": "Job_cluster001"
     },
-    "task_cluster": {
-        
-    },
+    "task_cluster": {},
     "automatic_cluster_allocation": true
 }

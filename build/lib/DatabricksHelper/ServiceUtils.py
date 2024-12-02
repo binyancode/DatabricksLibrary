@@ -115,7 +115,7 @@ class PipelineUtils:
         return params
 
     def init_run_common_job_params(self):
-        params = self.init_common_params(["job_name", ("timeout", "3600", "int")], False)
+        params = self.init_common_params(["job_name", ("timeout", "3600", "int"), "notebook_path"], False)
         # parameter_list = ["pipeline_run_id", "pipeline_name", "job_name", "default_catalog", "target_table", \
         #                   "source_file", "file_format", "table_alias", "reader_options", "reload_table", \
         #                     "max_load_rows", ("continue_run", "True", "bool"), ("timeout", "3600", "int"), 

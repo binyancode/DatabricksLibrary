@@ -25,6 +25,8 @@
     },
     "Data": {
         "Catalog": "evacatalog",
+        "TempSchema": "temp",
+        "TransformSchema": "transform",
         "Checkpoint": {
             "Path": "/Volumes/evacatalog/workflow/checkpoints/"
         },

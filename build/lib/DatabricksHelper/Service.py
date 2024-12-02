@@ -113,16 +113,16 @@ class TableLoadingValidationResult:
         self.error_message = error_message
 
 class TableLoadingStreamingProcessor(ABC):
-    def init(self, task_parameters, *args, **kwargs):
+    def init(self, table_alias, task_parameters, *args, **kwargs):
         pass
 
-    def validate(self, row) -> dict:
+    def validate(self, table_alias, row) -> dict:
         return []
 
-    def with_columns(self) -> list:
+    def with_columns(self, table_alias) -> list:
         return []
 
-    def process_cell(self, row, column_name, validations):
+    def process_cell(self, table_alias, row, column_name, validations):
         return row[column_name]
     
         
@@ -920,7 +920,11 @@ class Pipeline(PipelineCluster):
 
             df = df.toDF(*new_column_names + df.columns[len(new_column_names):])
         load_time = datetime.now()
+
+        uuid_udf = udf(lambda: str(uuid.uuid4()), StringType())
+
         df = df.withColumn("_source_metadata",col("_metadata")) \
+        .withColumn("_row_id",uuid_udf()) \
         .withColumn("_load_id",lit(load_id)) \
         .withColumn("_load_time",lit(load_time)) 
 
@@ -962,7 +966,7 @@ class Pipeline(PipelineCluster):
         else:
             return source
         
-    def __get_streaming_processor_object(code, task_parameters = None):
+    def __get_streaming_processor_object(table_alias, code, task_parameters = None):
         if code:
             module_name = "streaming_processor_module"
             streaming_processor_module = None
@@ -980,13 +984,13 @@ class Pipeline(PipelineCluster):
                 for name, type in inspect.getmembers(streaming_processor_module, inspect.isclass):
                     if issubclass(type, TableLoadingStreamingProcessor) and type is not TableLoadingStreamingProcessor:
                         streaming_processor_object = type()
-                        streaming_processor_object.init(task_parameters)
+                        streaming_processor_object.init(table_alias, task_parameters)
                         streaming_processor_module.streaming_processor_object = streaming_processor_object
                         print(f"Streaming processor object loaded: {name} {streaming_processor_object}")
                         return streaming_processor_module.streaming_processor_object
         return None
 
-    def __table_loading_streaming_process(self, df, streaming_processor = None, task_parameters = None):
+    def __table_loading_streaming_process(self, validation_col_name, table_alias, df, streaming_processor = None, task_parameters = None):
         if streaming_processor:
             path = streaming_processor
         elif self.task and self.job:
@@ -1032,9 +1036,9 @@ class Pipeline(PipelineCluster):
         #         globals_dict[name] = tp
         #         print(f"Global object registered: {name}, {tp}")
         notebook_code = None
-        if os.path.exists(path):
+        if path and os.path.exists(path):
             notebook_code = self.get_notebook(path)
-        streaming_processor_obj = Pipeline.__get_streaming_processor_object(notebook_code, task_parameters)
+        streaming_processor_obj = Pipeline.__get_streaming_processor_object(table_alias, notebook_code, task_parameters)
         # if streaming_processor_obj:
         #     init_obj = streaming_processor_obj.init()
         #     print(f"Streaming processor object loaded: {streaming_processor_obj}")
@@ -1074,13 +1078,17 @@ class Pipeline(PipelineCluster):
             StructField("validation_result", IntegerType(), True),
             StructField("validations", ArrayType(
                 StructType([
-                    StructField("id", StringType(), True),
+                    StructField("rule_id", StringType(), True),
                     StructField("result", IntegerType(), True),
                     StructField("description", StringType()),
                     StructField("data", StringType()),
-                    StructField("attributes", StringType()),
-                    StructField("priority", StringType()),
+                    StructField("attributes", ArrayType(StringType())),
+                    StructField("tags", ArrayType(StringType())),
                     StructField("category", StringType()),
+                    StructField("rule_type", StringType()),
+                    StructField("failed_process", StringType()),
+                    StructField("n_successes", IntegerType()),
+                    StructField("n_fails", IntegerType()),
                     StructField("properties", MapType(StringType(), StringType()))
                 ])
             ), True)
@@ -1095,13 +1103,15 @@ class Pipeline(PipelineCluster):
             #     exec(notebook_code, streaming_processor_module.__dict__)
             #     sys.modules[module_name] = streaming_processor_module
             #     importlib.import_module(module_name)
-            streaming_processor_obj = Pipeline.__get_streaming_processor_object(notebook_code, task_parameters)
+            streaming_processor_obj = Pipeline.__get_streaming_processor_object(table_alias, notebook_code, task_parameters)
             is_valid = True
+
+            validation = {}
             validations = []
             validation_result = sys.maxsize
             try:
                 if streaming_processor_obj:
-                    validations = streaming_processor_obj.validate(row)
+                    validations = streaming_processor_obj.validate(table_alias, row)
                     if validations:
                         if not isinstance(validations, list):
                             validations = [validations]
@@ -1115,20 +1125,23 @@ class Pipeline(PipelineCluster):
                 print(f"Validation error: {ex}")
                 error_trace = traceback.format_exc()
                 raise RuntimeError(error_trace) from ex
-            return {"is_valid": is_valid, "validation_result": validation_result, "validations": validations}
+            validation["is_valid"] = is_valid
+            validation["validation_result"] = validation_result
+            validation["validations"] = validations
+            return validation
 
-        df = df.withColumn("_validations", process_validations(struct([df[col] for col in df.columns])))
-        
+        df = df.withColumn(validation_col_name, process_validations(struct([df[col] for col in df.columns])))
+
         if streaming_processor_obj:
             process_functions = {}
-            ignore_columns = ["_rescued_data", "_source_metadata", "_load_id", "_load_time", "_validations"]
-            for field in [field for field in df.schema.fields if field.name in streaming_processor_obj.with_columns() and field.name not in ignore_columns]:
+            #ignore_columns = ["_rescued_data", "_source_metadata", "_load_id", "_load_time", "_validations"]
+            for field in [field for field in df.schema.fields if field.name in streaming_processor_obj.with_columns(table_alias) and not field.name.startswith('_')]:
                 print(f"{field.name}")
                 func_script = f"""
 @udf({field.dataType})
 def process_{field.name}(row, column_name, validations):
     streaming_processor_obj = Pipeline.__get_streaming_processor_object(notebook_code, task_parameters)
-    return streaming_processor_obj.process_cell(row, column_name, validations)
+    return streaming_processor_obj.process_cell(table_alias, row, column_name, validations)
 
 process_functions["{field.name}"] = process_{field.name}
     """
@@ -1136,11 +1149,10 @@ process_functions["{field.name}"] = process_{field.name}
                 globals_dict["streaming_processor_obj"] = streaming_processor_obj
                 globals_dict["process_functions"] = process_functions
                 exec(func_script, globals_dict)
-                df = df.withColumn(field.name, process_functions[field.name](struct([df[col] for col in df.columns]), lit(field.name), df["_validations"]))
-
+                df = df.withColumn(field.name, process_functions[field.name](struct([df[col] for col in df.columns]), lit(field.name), df[validation_col_name]))
         return df
 
-    def load_table(self, target_table, source_file, file_format, table_alias = None, reader_options = None, column_names = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1, streaming_processor = None, task_parameters = None):
+    def load_table(self, source_file, file_format, table_alias, target_table = None, reader_options = None, column_names = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1, streaming_processor = None, task_parameters = None):
         source_file = self.__parse_task_param(source_file)
         target_table = self.__parse_task_param(target_table)
         file_format = self.__parse_task_param(file_format)
@@ -1163,6 +1175,12 @@ process_functions["{field.name}"] = process_{field.name}
         print(f"reload_table:{reload_table}")
         print(f"streaming_processor:{streaming_processor}")
         print(f"task_parameters:{task_parameters}")
+
+        if not target_table:
+            target_table = table_alias
+
+        if re.search(r'\.(?![^`]*`)', target_table) is None:
+            target_table = f"{self.config['Data']['TempSchema']}.{target_table}"
 
         self.__get_last_load()
 
@@ -1224,7 +1242,7 @@ process_functions["{field.name}"] = process_{field.name}
         if read_transform is not None and callable(read_transform) and len(inspect.signature(read_transform).parameters) == 1:
             df = read_transform(df)
 
-        df = self.__table_loading_streaming_process(df, streaming_processor, task_parameters)
+        df = self.__table_loading_streaming_process("_validations", table_alias, df, streaming_processor = streaming_processor, task_parameters = task_parameters)
 
         print(df.schema)
         df = df.observe("metrics", count(lit(1)).alias("cnt"), max(lit(load_id)).alias("load_id"), approx_count_distinct(col("_source_metadata.file_path")).alias("file_cnt"))
@@ -1352,9 +1370,14 @@ process_functions["{field.name}"] = process_{field.name}
     #reload_info: {"businesspartner":"evacatalog.temp.businesspartner", "condition":"_load_id = 'xxx'"}
     #rekoad_info: {"businesspartner":{"query":"select * from evacatalog.temp.businesspartner where substring(`_source_metadata`.file_modification_time,1,10) >'2024-10-13'", "batch_size":10000, "partition_size":50}}
     #task_load_info: {"table": "temp.businesspartner", "view": "businesspartner", "load_id": "c99a7f26-6dcd-47e2-bb45-2bbc6ae0e906"}
-    def get_load_info(self, schema = None, debug = None, transform = None, task_load_info = None, reload_info = None, load_option = None):
+    def get_load_info(self, transform_schema = None, schema = None, debug = None, transform = None, task_load_info = None, reload_info = None, load_option = None, streaming_processor = None, task_parameters = None):
         #context = self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext()
-   
+        if not transform_schema:
+            if "TransformSchema" in self.config["Data"]:
+                transform_schema = self.config["Data"]["TransformSchema"]
+            else:
+                transform_schema = "transform"
+
         all_load_info = {}
         if self.job is not None and self.task is not None and not reload_info:
             load_info_schema = StructType([
@@ -1411,7 +1434,7 @@ process_functions["{field.name}"] = process_{field.name}
                             temp_df = transform_func(temp_df)
                     temp_df.createOrReplaceTempView(temp_view)
                     #load_info["data"] = temp_df
-                    all_load_info[f"{temp_view}_info"] = SimpleNamespace(**load_info)
+                    all_load_info[f"__{temp_view}_info"] = SimpleNamespace(**load_info)
                     all_load_info[temp_view] = temp_df 
 
                     #exec(f'{load_info["table"]}_load_id = "{load_info["load_id"]}"')
@@ -1494,6 +1517,7 @@ process_functions["{field.name}"] = process_{field.name}
                 temp_df.createOrReplaceTempView(temp_view)
                 all_load_info[temp_view] = temp_df
         if schema:
+            #original_col_suffix = str(uuid.uuid4())
             for temp_view, temp_df in all_load_info.items():
                 view_schema = schema.get(temp_view)
                 if view_schema:
@@ -1503,6 +1527,28 @@ process_functions["{field.name}"] = process_{field.name}
                         print(f"view:{temp_view} apply schema:{col_name}")
                     temp_df.createOrReplaceTempView(temp_view)
                     all_load_info[temp_view] = temp_df
+
+        for temp_view, temp_df in all_load_info.items():
+            if temp_view.startswith("__"):
+                continue
+            temp_df = self.__table_loading_streaming_process("_validations_transform", temp_view, temp_df, streaming_processor = streaming_processor, task_parameters = task_parameters)
+            temp_df.write \
+            .mode("overwrite") \
+            .option("partitionOverwriteMode", "dynamic") \
+            .option("mergeSchema", "true") \
+            .partitionBy("_load_id", "_load_time") \
+            .saveAsTable(f"{self.default_catalog}.{transform_schema}.{temp_view}")
+            temp_df = self.spark_session.table(f"{self.default_catalog}.{transform_schema}.{temp_view}")
+            temp_df.createOrReplaceTempView(temp_view)
+            all_load_info[temp_view] = temp_df
+        #如果有validation，路径为task_key/temp_view
+        #temp_df = self.__table_loading_streaming_process(temp_df, streaming_processor, task_parameters)
+        #加载validation code
+        #df.write \
+        #.mode("overwrite") \
+        #.option("partitionOverwriteMode", "dynamic") \
+        #.saveAsTable("evacatalog.transform.businesspartner")
+        #
 
         load = SimpleNamespace(**all_load_info)
         #load.load = MethodType(lambda this,table:self.load_temp_table(table), load)
