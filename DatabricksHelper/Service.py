@@ -1529,7 +1529,7 @@ process_functions["{field.name}"] = process_{field.name}
                     all_load_info[temp_view] = temp_df
 
         for temp_view, temp_df in all_load_info.items():
-            if transform_options is None or (temp_view in transform_options and transform_options[temp_view].get("SaveAsTable", False)):
+            if transform_options is None or (temp_view in transform_options and transform_options[temp_view].get("save_as_table", False)):
                 if temp_view.startswith("__") or not isinstance(temp_df, DataFrame):
                     continue
                 temp_df = self.__table_loading_streaming_process("_validations_transform", temp_view, temp_df, streaming_processor = streaming_processor, task_parameters = task_parameters)
