@@ -126,7 +126,22 @@ class TableLoadingStreamingProcessor(ABC):
     def process_cell(self, table_alias, row, column_name, validations):
         return row[column_name]
     
-        
+class AsyncTaskProcessor:
+    def __init__(self, max_workers):
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        self.futures = {}
+
+    def submit(self, key, fn, *args, **kwargs):
+        future = self.executor.submit(fn, *args, **kwargs)
+        self.futures[future] = key
+
+    def wait(self):
+        results = {}
+        for future in concurrent.futures.as_completed(self.futures):
+            key = self.futures[future]
+            results[key] = future.result()
+        self.executor.shutdown()
+        return results
 
 class PipelineAPI:
     def request(self, method, path, data = None, headers = None):
@@ -1533,19 +1548,35 @@ process_functions["{field.name}"] = process_{field.name}
                     temp_df.createOrReplaceTempView(temp_view)
                     all_load_info[temp_view] = temp_df
    
+        # if transform_options:
+        #     concurrency = transform_options.get("transform_concurrency", 4)
+        #     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+        #         futures = {executor.submit(self.__process_transform_table, all_load_info, transform_options, temp_view, temp_df, transform_schema, streaming_processor, task_parameters): temp_view for temp_view, temp_df in all_load_info.items()}
+        #         results = {}
+        #         for future in concurrent.futures.as_completed(futures):
+        #             key = futures[future] #key is temp_view
+        #             try:
+        #                 result = future.result()
+        #                 results[key] = result
+        #                 print(f"Process transform {key}", result)
+        #             except Exception as ex:
+        #                 print(f'Transform {key} generated an exception: {ex}')
+
         if transform_options:
             concurrency = transform_options.get("transform_concurrency", 4)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
-                futures = {executor.submit(self.__process_transform_table, all_load_info, transform_options, temp_view, temp_df, transform_schema, streaming_processor, task_parameters): temp_view for temp_view, temp_df in all_load_info.items()}
-                results = {}
-                for future in concurrent.futures.as_completed(futures):
-                    key = futures[future] #key is temp_view
-                    try:
-                        result = future.result()
-                        results[key] = result
-                        print(f"Process transform {key}", result)
-                    except Exception as ex:
-                        print(f'Transform {key} generated an exception: {ex}')
+            processor = AsyncTaskProcessor(max_workers=concurrency)
+
+            for temp_view, temp_df in all_load_info.items():
+                processor.submit(temp_view, self.__process_transform_table, all_load_info, transform_options, temp_view, temp_df, transform_schema, streaming_processor, task_parameters)
+
+            try:
+                results = processor.wait()
+            except Exception as ex:
+                print(f'Transform {key} generated an exception: {ex}')
+                raise ex
+            
+            for key, result in results.items():
+                print(f"Process transform {key}", result)
 
         # for temp_view, temp_df in all_load_info.items():
         #     if transform_options is not None and temp_view in transform_options and transform_options[temp_view].get("save_as_table", False):
