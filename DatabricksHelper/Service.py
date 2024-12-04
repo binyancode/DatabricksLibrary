@@ -547,7 +547,7 @@ class StreamingMetrics:
 class StreamingListener(StreamingQueryListener):
     def onQueryStarted(self, event):
         self.start_time = time.time()
-        print("stream started!")
+        print(f"{datetime.now(timezone.utc).replace(microsecond=0).strftime('%Y-%m-%d %H:%M:%S')}, stream started!")
 
     def onQueryProgress(self, event):
         #print(event.progress.json)
@@ -568,7 +568,7 @@ class StreamingListener(StreamingQueryListener):
         self.end_time = time.time()
         self.metrics.terminate()
         self.logs.log("streaming", {"metrics":self.metrics.as_dict(), "max_load_rows":self.max_load_rows, "continue_status":False or self.metrics.streaming_status == "Stopped"}, True)
-        print(f"stream terminated!")
+        print(f"{datetime.now(timezone.utc).replace(microsecond=0).strftime('%Y-%m-%d %H:%M:%S')}, stream terminated!")
 
     logs:LogService
     metrics:StreamingMetrics
@@ -986,9 +986,13 @@ class Pipeline(PipelineCluster):
         else:
             return source
         
-    
+    streaming_processor_objects = {}
 
     def __get_streaming_processor_object(table_alias, code, task_parameters = None):
+        obj_name = f'streaming_processor_object_{table_alias}'
+        if obj_name in Pipeline.streaming_processor_objects:
+            return Pipeline.streaming_processor_objects[obj_name]
+        
         if code:
             module_name = f"streaming_processor_module"
             streaming_processor_module = None
@@ -1000,17 +1004,17 @@ class Pipeline(PipelineCluster):
             else:
                 streaming_processor_module = sys.modules[module_name]
             
-            obj_name = f'streaming_processor_object_{table_alias}'
-            if hasattr(streaming_processor_module, obj_name):
-                return getattr(streaming_processor_module, obj_name)
-            else:
-                for name, type in inspect.getmembers(streaming_processor_module, inspect.isclass):
-                    if issubclass(type, TableLoadingStreamingProcessor) and type is not TableLoadingStreamingProcessor:
-                        streaming_processor_object = type()
-                        streaming_processor_object.init(table_alias, task_parameters)
-                        setattr(streaming_processor_module, obj_name, streaming_processor_object)
-                        print(f"Streaming processor object loaded: {name} {streaming_processor_object}")
-                        return streaming_processor_object
+            # if hasattr(streaming_processor_module, obj_name):
+            #     return getattr(streaming_processor_module, obj_name)
+            # else:
+            for name, type in inspect.getmembers(streaming_processor_module, inspect.isclass):
+                if issubclass(type, TableLoadingStreamingProcessor) and type is not TableLoadingStreamingProcessor:
+                    streaming_processor_object = type()
+                    streaming_processor_object.init(table_alias, task_parameters)
+                    Pipeline.streaming_processor_objects[obj_name] = streaming_processor_object
+                    #setattr(streaming_processor_module, obj_name, streaming_processor_object)
+                    print(f"Streaming processor object loaded: {name} {streaming_processor_object}")
+                    return streaming_processor_object
         return None
 
     def __table_loading_streaming_process(self, validation_col_name, table_alias, df, streaming_processor = None, task_parameters = None):

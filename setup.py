@@ -1,12 +1,13 @@
 import setuptools
 import os
+import datetime
 
 def read_version():
-    if not os.path.exists("version.txt"):
+    with open('version.txt', 'r') as file:
+        lines = file.readlines()
+        if lines:
+            return lines[-1].strip().split(',')[1]
         return '0.1.0'
-    with open("version.txt", "r") as fh:
-        version = fh.read().strip()
-    return version
 
 def increment_version(version):
     major, minor, patch = map(int, version.split('.'))
@@ -14,8 +15,9 @@ def increment_version(version):
     return f"{major}.{minor}.{patch}"
 
 def write_version(version):
-    with open("version.txt", "w") as fh:
-        fh.write(version)
+    with open('version.txt', 'a') as file:
+        current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        file.write(f"{current_time},{version}\n")
 
 def write_library_version(version):
     with open("DatabricksHelper/Version.py", "r") as fh:

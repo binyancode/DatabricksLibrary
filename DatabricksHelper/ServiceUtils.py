@@ -131,7 +131,7 @@ class PipelineUtils:
         return params
 
     def init_transform_params(self):
-        params = self.init_common_params(["task_load_info", "reload_info"])
+        params = self.init_common_params(["task_load_info", "reload_info", "transform_options"])
         params = vars(params)
         if params["task_load_info"] and isinstance(params["task_load_info"], str):
             try:
@@ -141,6 +141,11 @@ class PipelineUtils:
         if params["reload_info"] and isinstance(params["reload_info"], str):
             try:
                 params["reload_info"] = json.loads(params["reload_info"])
+            except Exception as e: 
+                print(e)
+        if params["transform_options"] and isinstance(params["transform_options"], str):
+            try:
+                params["transform_options"] = json.loads(params["transform_options"])
             except Exception as e: 
                 print(e)
         params = SimpleNamespace(**params)
