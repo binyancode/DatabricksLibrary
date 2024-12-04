@@ -64,6 +64,7 @@ import csv
 import io
 import traceback
 import types
+import concurrent.futures
 
 # def get_spark_id():
 #     import IPython
@@ -966,9 +967,11 @@ class Pipeline(PipelineCluster):
         else:
             return source
         
+    
+
     def __get_streaming_processor_object(table_alias, code, task_parameters = None):
         if code:
-            module_name = "streaming_processor_module"
+            module_name = f"streaming_processor_module"
             streaming_processor_module = None
             if module_name not in sys.modules:
                 streaming_processor_module = types.ModuleType(module_name)
@@ -978,16 +981,17 @@ class Pipeline(PipelineCluster):
             else:
                 streaming_processor_module = sys.modules[module_name]
             
-            if hasattr(streaming_processor_module, 'streaming_processor_object'):
-                return streaming_processor_module.streaming_processor_object
+            obj_name = f'streaming_processor_object_{table_alias}'
+            if hasattr(streaming_processor_module, obj_name):
+                return getattr(streaming_processor_module, obj_name)
             else:
                 for name, type in inspect.getmembers(streaming_processor_module, inspect.isclass):
                     if issubclass(type, TableLoadingStreamingProcessor) and type is not TableLoadingStreamingProcessor:
                         streaming_processor_object = type()
                         streaming_processor_object.init(table_alias, task_parameters)
-                        streaming_processor_module.streaming_processor_object = streaming_processor_object
+                        setattr(streaming_processor_module, obj_name, streaming_processor_object)
                         print(f"Streaming processor object loaded: {name} {streaming_processor_object}")
-                        return streaming_processor_module.streaming_processor_object
+                        return streaming_processor_object
         return None
 
     def __table_loading_streaming_process(self, validation_col_name, table_alias, df, streaming_processor = None, task_parameters = None):
@@ -1370,6 +1374,7 @@ process_functions["{field.name}"] = process_{field.name}
     #reload_info: {"businesspartner":"evacatalog.temp.businesspartner", "condition":"_load_id = 'xxx'"}
     #rekoad_info: {"businesspartner":{"query":"select * from evacatalog.temp.businesspartner where substring(`_source_metadata`.file_modification_time,1,10) >'2024-10-13'", "batch_size":10000, "partition_size":50}}
     #task_load_info: {"table": "temp.businesspartner", "view": "businesspartner", "load_id": "c99a7f26-6dcd-47e2-bb45-2bbc6ae0e906"}
+    #transform_options: { "transform_concurrency": 8, transforms:{"businesspartner": {"save_as_table": True}}}
     def get_load_info(self, transform_schema = None, schema = None, debug = None, transform = None, task_load_info = None, reload_info = None, load_option = None, transform_options = None, streaming_processor = None, task_parameters = None):
         #context = self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext()
         if not transform_schema:
@@ -1527,34 +1532,80 @@ process_functions["{field.name}"] = process_{field.name}
                         print(f"view:{temp_view} apply schema:{col_name}")
                     temp_df.createOrReplaceTempView(temp_view)
                     all_load_info[temp_view] = temp_df
+   
+        if transform_options:
+            concurrency = transform_options.get("transform_concurrency", 4)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+                futures = {executor.submit(self.__process_transform_table, all_load_info, transform_options, temp_view, temp_df, transform_schema, streaming_processor, task_parameters): temp_view for temp_view, temp_df in all_load_info.items()}
+                results = {}
+                for future in concurrent.futures.as_completed(futures):
+                    key = futures[future] #key is temp_view
+                    try:
+                        result = future.result()
+                        results[key] = result
+                        print(f"Process transform {key}", result)
+                    except Exception as ex:
+                        print(f'Transform {key} generated an exception: {ex}')
 
-        for temp_view, temp_df in all_load_info.items():
-            if transform_options is None or (temp_view in transform_options and transform_options[temp_view].get("save_as_table", False)):
-                if temp_view.startswith("__") or not isinstance(temp_df, DataFrame):
-                    continue
-                temp_df = self.__table_loading_streaming_process("_validations_transform", temp_view, temp_df, streaming_processor = streaming_processor, task_parameters = task_parameters)
-                temp_df.write \
-                .mode("overwrite") \
-                .option("partitionOverwriteMode", "dynamic") \
-                .option("mergeSchema", "true") \
-                .partitionBy("_load_id", "_load_time") \
-                .saveAsTable(f"{self.default_catalog}.{transform_schema}.{temp_view}")
-                load_id = all_load_info[f"__{temp_view}_info"].load_id
-                temp_df = self.spark_session.sql(f"select * from {self.default_catalog}.{transform_schema}.{temp_view} where _load_id = '{load_id}'")
-                temp_df.createOrReplaceTempView(temp_view)
-                all_load_info[temp_view] = temp_df
-        #如果有validation，路径为task_key/temp_view
-        #temp_df = self.__table_loading_streaming_process(temp_df, streaming_processor, task_parameters)
-        #加载validation code
-        #df.write \
-        #.mode("overwrite") \
-        #.option("partitionOverwriteMode", "dynamic") \
-        #.saveAsTable("evacatalog.transform.businesspartner")
-        #
+        # for temp_view, temp_df in all_load_info.items():
+        #     if transform_options is not None and temp_view in transform_options and transform_options[temp_view].get("save_as_table", False):
+        #         retention = transform_options[temp_view].get("retention", 90)
+        #         if temp_view.startswith("__") or not isinstance(temp_df, DataFrame):
+        #             continue
+        #         temp_df = self.__table_loading_streaming_process("_validations_transform", temp_view, temp_df, streaming_processor = streaming_processor, task_parameters = task_parameters)
+
+        #         self.__save_transform_table(temp_df, temp_view, transform_schema, retention)
+
+        #         load_id = all_load_info[f"__{temp_view}_info"].load_id
+        #         temp_df = self.spark_session.sql(f"select * from {self.default_catalog}.{transform_schema}.{temp_view} where _load_id = '{load_id}' and _validations_transform.is_valid = TRUE")
+        #         temp_df.createOrReplaceTempView(temp_view)
+        #         all_load_info[temp_view] = temp_df
+
 
         load = SimpleNamespace(**all_load_info)
         #load.load = MethodType(lambda this,table:self.load_temp_table(table), load)
         return load
+
+    def __process_transform_table(self, all_load_info, transform_options, temp_view, temp_df, transform_schema, streaming_processor, task_parameters):
+        if transform_options and transform_options.get("transforms", {}).get(temp_view, {}).get("save_as_table", False):
+            retention = transform_options.get("transforms", {}).get(temp_view, {}).get("retention", 90)
+            if temp_view.startswith("__") or not isinstance(temp_df, DataFrame):
+                return
+            
+            temp_df = self.__table_loading_streaming_process("_validations_transform", temp_view, temp_df, streaming_processor = streaming_processor, task_parameters = task_parameters)
+            
+            self.__save_transform_table(temp_df, temp_view, transform_schema, retention)
+
+            load_id = all_load_info[f"__{temp_view}_info"].load_id
+            temp_df = self.spark_session.sql(f"select * from {self.default_catalog}.{transform_schema}.{temp_view} where _load_id = '{load_id}' and _validations_transform.is_valid = TRUE")
+            temp_df.createOrReplaceTempView(temp_view)
+            all_load_info[temp_view] = temp_df
+            return True
+        return False
+
+    def __save_transform_table(self, temp_df, temp_view, transform_schema, retention = -1):
+        try:
+            table_name = f"{self.default_catalog}.{transform_schema}.{temp_view}"
+            temp_df.write \
+            .mode("overwrite") \
+            .option("partitionOverwriteMode", "dynamic") \
+            .option("mergeSchema", "true") \
+            .partitionBy("_load_id", "_load_time") \
+            .saveAsTable(table_name)
+            if retention > 0:
+                self.clear_table([table_name], (datetime.now() - timedelta(days=retention)).strftime("%Y-%m-%d"))
+        except Exception as ex:
+            print(f"Save as table error: {ex}")
+            new_table_name = f"{self.default_catalog}.{transform_schema}.{temp_view}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{str(uuid.uuid4()).replace('-', '')}"
+            self.spark_session.sql(f"ALTER TABLE {table_name} RENAME TO {new_table_name}")
+            print(f"Rename transform table from {temp_view} to {new_table_name}")
+            temp_df.write \
+            .mode("overwrite") \
+            .option("partitionOverwriteMode", "dynamic") \
+            .option("mergeSchema", "true") \
+            .partitionBy("_load_id", "_load_time") \
+            .saveAsTable(table_name)
+            
 
     def set_default_catalog(self, catalog):
         self.spark_session.catalog.setCurrentCatalog(catalog)

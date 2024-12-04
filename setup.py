@@ -17,9 +17,19 @@ def write_version(version):
     with open("version.txt", "w") as fh:
         fh.write(version)
 
+def write_library_version(version):
+    with open("DatabricksHelper/Version.py", "r") as fh:
+        lines = fh.readlines()
+    with open("DatabricksHelper/Version.py", "w") as fh:
+        for line in lines:
+            if line.startswith('__version__'):
+                line = f"__version__ = '{version}'\n"
+            fh.write(line)
+
 current_version = read_version()
 new_version = increment_version(current_version)
 write_version(new_version)
+write_library_version(new_version)
 
 with open("README.md", "r") as fh:
     long_description = fh.read()
