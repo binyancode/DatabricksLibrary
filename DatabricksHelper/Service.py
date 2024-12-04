@@ -143,6 +143,10 @@ class AsyncTaskProcessor:
         self.executor.shutdown()
         return results
 
+    def set_max_workers(self, max_workers):
+        self.max_workers = max_workers
+        self.executor._max_workers = max_workers
+
 class PipelineAPI:
     def request(self, method, path, data = None, headers = None):
         if headers is None:
@@ -1563,7 +1567,7 @@ process_functions["{field.name}"] = process_{field.name}
         #                 print(f'Transform {key} generated an exception: {ex}')
 
         if transform_options:
-            concurrency = transform_options.get("transform_concurrency", 4)
+            concurrency = transform_options.get("transform_concurrency", 1)
             processor = AsyncTaskProcessor(max_workers=concurrency)
 
             for temp_view, temp_df in all_load_info.items():
@@ -1640,6 +1644,17 @@ process_functions["{field.name}"] = process_{field.name}
 
     def set_default_catalog(self, catalog):
         self.spark_session.catalog.setCurrentCatalog(catalog)
+
+    def async_merge_table(self, concurrency = 1, *args, **kwargs):
+        if not hasattr(self, 'async_merge_table_pool'):
+            self.async_merge_table_pool = AsyncTaskProcessor(max_workers=concurrency)
+        else:
+            self.async_merge_table_pool.set_max_workers(concurrency)
+        self.async_merge_table_pool.submit(args, self.merge_table, *args, **kwargs)
+
+    def wait_async_merge_table(self):
+        if hasattr(self, 'async_merge_table_pool'):
+            self.async_merge_table_pool.wait()
 
     def merge_table(self, table_aliases, target_table: str, source_table: Union[str, DataFrame], keys, mode: MergeMode, merge_overwrite_no_match = None, source_script = None, schema = "workflow", insert_columns = None, update_columns = None, keep_columns = None, state = 'succeeded'):
         if source_table and isinstance(source_table, str):
@@ -1972,6 +1987,7 @@ process_functions["{field.name}"] = process_{field.name}
         self.pipeline_run_id = pipeline_run_id
         self.pipeline_name = pipeline_name
         self.logs = self.__init_logs(self.job, self.task)
+        
         
         print(self.context)
         print(f"Current job: {self.job.settings.name}") if self.job else print("Current job: None")
