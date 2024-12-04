@@ -554,7 +554,7 @@ class StreamingListener(StreamingQueryListener):
         #self.logs.log('streaming_progress', event.progress.json)
         row = event.progress.observedMetrics.get("metrics")
         if row is not None and row.load_id is not None:
-            print(f"{row.load_id}-{row.cnt} rows processed!")
+            #print(f"{row.load_id}-{row.cnt} rows processed!")
 
             self.metrics.add_row_count(row.cnt)
             self.metrics.set_file_count(row.file_cnt)
