@@ -65,7 +65,7 @@ import io
 import traceback
 import types
 import concurrent.futures
-
+from Common import Functions
 # def get_spark_id():
 #     import IPython
 #     spark_session = IPython.get_ipython().user_ns["spark"]
@@ -85,6 +85,8 @@ import concurrent.futures
 
 # streaming_processor_module_name = f"streaming_processor_module"
 # import_streaming_processor_module(streaming_processor_module_name)
+
+
 
 
 class Reload(IntFlag):
@@ -553,9 +555,11 @@ class StreamingListener(StreamingQueryListener):
         #print(event.progress.json)
         #self.logs.log('streaming_progress', event.progress.json)
         row = event.progress.observedMetrics.get("metrics")
+        #print(row)
         if row is not None and row.load_id is not None:
             #print(f"{row.load_id}-{row.cnt} rows processed!")
-
+            #file_cnt = sum(source.metrics.get("numFilesOutstanding", 0) for source in event.progress.sources) if event.progress.sources else 0
+            #file_cnt = event.progress.sources[0].metrics.get("numFilesOutstanding", 0)
             self.metrics.add_row_count(row.cnt)
             self.metrics.set_file_count(row.file_cnt)
             print(f"{datetime.now(timezone.utc).replace(microsecond=0).strftime('%Y-%m-%d %H:%M:%S')} Processed row count: {self.metrics.row_count}/{self.metrics.file_count}")
@@ -921,7 +925,8 @@ class Pipeline(PipelineCluster):
         .format("cloudFiles") \
         .option("cloudFiles.format", file_format)\
         .option("cloudFiles.inferColumnTypes", "true")\
-        .option("cloudFiles.schemaLocation", schema_dir)
+        .option("cloudFiles.schemaLocation", schema_dir)\
+        .option("cloudFiles.useStrictGlobber", "true")
 
         if 'ReaderOptions' in self.config["Data"]:
             for key, value in self.config["Data"]["ReaderOptions"].items():
@@ -1272,7 +1277,7 @@ process_functions["{field.name}"] = process_{field.name}
         df = self.__table_loading_streaming_process("_validations", table_alias, df, streaming_processor = streaming_processor, task_parameters = task_parameters)
 
         print(df.schema)
-        df = df.observe("metrics", count(lit(1)).alias("cnt"), max(lit(load_id)).alias("load_id"), approx_count_distinct(col("_source_metadata.file_path")).alias("file_cnt"))
+        df = df.observe("metrics", count(lit(1)).alias("cnt"), max(lit(load_id)).alias("load_id"), approx_count_distinct(col("_source_metadata.file_path")).alias("file_cnt")) #approx_count_distinct(col("_source_metadata.file_path")).alias("file_cnt")
         df = df.writeStream
 
         if write_transform is not None and callable(write_transform) and len(inspect.signature(write_transform).parameters) == 1:
@@ -1616,7 +1621,7 @@ process_functions["{field.name}"] = process_{field.name}
             self.__save_transform_table(temp_df, temp_view, transform_schema, retention)
 
             load_id = all_load_info[f"__{temp_view}_info"].load_id
-            temp_df = self.spark_session.sql(f"select * from {self.default_catalog}.{transform_schema}.{temp_view} where _load_id = '{load_id}' and _validations_transform.is_valid = TRUE")
+            temp_df = self.spark_session.sql(f"select * from {self.default_catalog}.{transform_schema}.{temp_view} where _load_id = '{load_id}' and _validations.is_valid = TRUE and _validations_transform.is_valid = TRUE")
             temp_df.createOrReplaceTempView(temp_view)
             all_load_info[temp_view] = temp_df
             return True

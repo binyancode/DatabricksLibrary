@@ -24,3 +24,50 @@ git branch -M main
 git push -u origin main
 
 https://docs.databricks.com/api/workspace/jobs#operation/JobsRunsSubmit
+
+
+SELECT * FROM cloud_files_state('/Volumes/evacatalog/workflow/checkpoints/evacatalog/temp.businesspartner/');
+
+  update [datahub].[PipelineTrigger]
+  set [Pipeline] = '{
+    "type": "Databricks",
+    "workflow": "run_load_job",
+    "workspace": "adb-732672050507723.3.databricks.azure.cn",
+    "retry": 3,
+	"repairable": true,
+	"timeout": -1,
+    "parameter": {
+        "default_catalog": "evacatalog",
+        "table_alias": {
+            "load_bp": "businesspartner"
+        },
+        "job_name": "bp_job",
+		"timeout": 36000,
+        "continue_run": true,
+        "notebook_path": {
+            "transform_bp": "/Workspace/eVA/transform/Transform_BusinessPartner"
+        },
+        "notebook_timeout": "3600",
+        "reader_options": {
+            "load_bp": {
+                "cloudFiles.schemaHints": "Data STRING",
+                "cloudFiles.maxFileAge": "90 days",
+                "cloudFiles.partitionColumns": ""
+            }
+        },
+		"reload_table": "Reload.DEFAULT",
+		"max_load_rows": {"load_bp": 10000},
+        "source_file": {
+            "load_bp": {
+                "value": "f\"/Volumes/evacatalog/temp/dataonboarding/raw/businesspartner/{{{'',''.join((lambda d: [f''year={d.year}/month={d.month:02d}/day={d.day:02d}'' for d in [datetime.now() - timedelta(days=i) for i in range(2, -1, -1)]])(datetime.now()))}}}/\"",
+                "is_dynamic": true
+            }
+        },
+        "task_parameters": {
+            "transform_bp": {
+                "file_name": "abc.json"
+            }
+        }
+    }
+}'
+where name = 'businesspartner'

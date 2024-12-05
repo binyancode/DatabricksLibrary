@@ -1,0 +1,25 @@
+{
+    "cluster_name": "bin yan's Cluster",
+    "spark_version": "14.3.x-scala2.12",
+    "azure_attributes": {
+        "first_on_demand": 1,
+        "availability": "ON_DEMAND_AZURE",
+        "spot_bid_max_price": -1
+    },
+    "node_type_id": "Standard_F8s_v2",
+    "driver_node_type_id": "Standard_F8s_v2",
+    "spark_env_vars": {
+        "DATABRICKS_CONFIG": "/Volumes/evacatalog/workflow/config/config.json"
+    },
+    "autotermination_minutes": 20,
+    "enable_elastic_disk": true,
+    "enable_local_disk_encryption": false,
+    "data_security_mode": "USER_ISOLATION",
+    "runtime_engine": "STANDARD",
+    "effective_spark_version": "14.3.x-scala2.12",
+    "autoscale": {
+        "min_workers": 1,
+        "max_workers": 2
+    },
+    "apply_policy_default_values": false
+}
