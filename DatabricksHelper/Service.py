@@ -1206,7 +1206,7 @@ process_functions["{field.name}"] = process_{field.name}
             self.__add_streaming_listener(max_load_rows, load_table_info)
             loaded_sources = []
             if "loaded_source" in self.logs.logs:
-                loaded_sources = self.logs.logs["loaded_sources"]
+                loaded_sources = [item["loaded_source"] for item in self.logs.logs["loaded_sources"]]
             # if loaded_sources:
             #     print(f"Last load source: {loaded_sources.pop()}")
             
@@ -1216,7 +1216,7 @@ process_functions["{field.name}"] = process_{field.name}
                     print(f"Loading source: {file}")
                     self.__load_table(load_id, file, file_format, table_alias, target_table, reader_options, column_names, transform, reload_table, max_load_rows, streaming_processor, task_parameters)
                     if self.streaming_listener.metrics.streaming_status != "Stopped":
-                        self.logs.log("loaded_sources", file, True)
+                        self.logs.log("loaded_sources", { "loaded_source": file }, True)
                     else:
                         print(f"Loading is stopped due to streaming status: {self.streaming_listener.metrics.streaming_status}")
                         break
