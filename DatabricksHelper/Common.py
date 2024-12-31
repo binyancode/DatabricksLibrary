@@ -23,6 +23,8 @@ class AsyncTaskProcessor:
         self.max_workers = max_workers
         self.executor._max_workers = max_workers
 
+
+
 class Functions:
     @staticmethod
     def generate_day_range_path(target_date, range_days=3):
@@ -52,3 +54,9 @@ class Functions:
             day_str = f"year={day.year}/month={day.month:02}/day={day.day:02}"
             days_list.append(day_str)
         return days_list[::-1]
+    
+    @staticmethod
+    def serialize_datetime(obj): 
+        if isinstance(obj, datetime.datetime): 
+            return str(obj)
+        return None

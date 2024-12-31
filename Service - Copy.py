@@ -260,10 +260,6 @@ class PipelineService:
                 dependent_tasks.extend(self._get_all_dependent_tasks(tasks, depend_on_task, seen))
         return dependent_tasks
 
-    def set_default_catalog(self, catalog):
-        self.spark_session.catalog.setCurrentCatalog(catalog)
-        print(f"Set default catalog: {catalog}")
-
     def get_task_values(self):
         task_load_info = {}
         if self.job is not None and self.task is not None:
@@ -411,7 +407,7 @@ class LogService:
                     "content": content
                 }
             }
-            json_data = json.dumps(data, default=Functions.serialize_datetime)
+            json_data = json.dumps(data)
             # print(self.runtime_info["config"]["Log"]["LogAPI"])
             response = requests.post(self.runtime_info["config"]["Log"]["LogAPI"], headers={'Content-Type': 'application/json'}, data=json_data)
             if response.status_code != 200:
@@ -464,8 +460,11 @@ class LogService:
 
     def read_log(self):
         if os.path.exists(self.log_file):
-            with open(self.log_file, 'r') as file:
-                return json.load(file)
+            try:
+                with open(self.log_file, 'r') as file:
+                    return json.load(file)
+            except Exception as e:
+                print(e)
         return {}
 
     session_id:str
@@ -492,8 +491,12 @@ class StreamingMetrics:
     
     def terminate(self):
         self.__lock.acquire()
+        print(f"terminate: {self.streaming_status}")
+        if self.streaming_status == "Stopped":
+            return
         try:
             if self.streaming_status == "Running":
+                print(f"terminate: set Finished")
                 self.streaming_status = "Finished"
                 self.life_cycle_status = "Finished"
             else:
@@ -504,7 +507,10 @@ class StreamingMetrics:
     def stop(self):
         self.__lock.acquire()
         try:
+            print(f"stop: {self.streaming_status}")
             self.streaming_status = "Stopped"
+            if self.query:
+                self.query.stop()
         finally:
             self.__lock.release()
     def add_row_count(self, cnt):
@@ -521,6 +527,9 @@ class StreamingMetrics:
             self.__lock.release()
     def as_dict(self):
         return {"row_count":self.row_count, "streaming_status": self.streaming_status, "life_cycle_status": self.life_cycle_status}
+    
+    def __init__(self):
+        self.query = None
 
 class StreamingListener(StreamingQueryListener):
     def onQueryStarted(self, event):
@@ -688,7 +697,7 @@ class PipelineCluster(PipelineService):
 
         print(f"Entry cluster: {self.cluster.cluster_id}({self.cluster.cluster_name})")
 
-        job_cluster_file = os.path.join(self.config["Job"]["Cluster"]["Path"], f"{job_name}.json")#self.workspace_id, 
+        job_cluster_file = os.path.join(self.config["Job"]["Cluster"]["Path"], self.default_catalog, f"{job_name}.json")#self.workspace_id, 
         if os.path.exists(job_cluster_file):
             print(f"The job cluster file '{job_cluster_file}' exists.")
             with open(job_cluster_file, 'r') as file:
@@ -890,14 +899,7 @@ class Pipeline(PipelineCluster):
         self.logs.post_log("Running", "run_job", { "job_name": f'{job_name}', "is_repair": False })
         return (self.__running(wait_run, timeout), self.__check_continue(job_name))
 
-    def __read_data(self, source_file, file_format, schema_dir, reader_options = None, column_names = None):
-        if not self.last_load.load_info or self.last_load.load_info["status"] == "succeeded":
-            load_id = str(uuid.uuid4())
-            print(f"New load id: {load_id}")
-        else:
-            load_id = self.last_load.load_info["load_id"]
-            print(f"Reuse load id: {load_id}")
-        self.logs.log("load_info", { "load_id": load_id, "status": "loading", "source_file": source_file, "file_format": file_format, "schema_dir": schema_dir }, True)
+    def __read_data(self, load_id, source_file, file_format, schema_dir, reader_options = None, column_names = None):
 
         df = self.spark_session.readStream \
         .format("cloudFiles") \
@@ -1185,14 +1187,61 @@ process_functions["{field.name}"] = process_{field.name}
         print(f"reload_table:{reload_table}")
         print(f"streaming_processor:{streaming_processor}")
         print(f"task_parameters:{task_parameters}")
+        self.__get_last_load()
+        if not self.last_load.load_info or self.last_load.load_info["status"] == "succeeded":
+            load_id = str(uuid.uuid4())
+            print(f"Generate new load_id: {load_id}.")
+        else:
+            load_id = self.last_load.load_info["load_id"]
+            print(f"Use last load_id: {load_id}.")
+        self.logs.log("load_info", { "load_id": load_id, "status": "loading", "source_file": source_file, "file_format": file_format }, True)
 
+
+        self.__load_table(load_id, file, file_format, table_alias, target_table, reader_options, column_names, transform, reload_table, max_load_rows, streaming_processor, task_parameters)
+        # if isinstance(source_file, str) and source_file:
+        #     source_file = [source_file]
+        # if source_file: 
+            
+        #     load_table_info = {
+        #         "target_table": target_table,
+        #         "source_file": source_file,
+        #         "file_format": file_format,
+        #         "table_alias": table_alias,
+        #         "reader_options": reader_options,
+        #         "column_names": column_names,
+        #         "max_load_rows": max_load_rows,
+        #         "reload_table": reload_table.name,
+        #     }
+
+        #     self.__add_streaming_listener(max_load_rows, load_table_info)
+        #     loaded_sources = []
+        #     if "loaded_source" in self.logs.logs:
+        #         loaded_sources = [item["loaded_source"] for item in self.logs.logs["loaded_sources"]]
+        #     # if loaded_sources:
+        #     #     print(f"Last load source: {loaded_sources.pop()}")
+            
+        #     print(f"Loaded sources: {loaded_sources}")
+        #     for file in source_file:
+        #         if file not in loaded_sources:
+        #             print(f"Loading source: {file}")
+        #             self.__load_table(load_id, file, file_format, table_alias, target_table, reader_options, column_names, transform, reload_table, max_load_rows, streaming_processor, task_parameters)
+        #             print(f"streaming_status: {self.streaming_listener.metrics.streaming_status}")
+        #             if self.streaming_listener.metrics.streaming_status != "Stopped":
+        #                 self.logs.log("loaded_sources", { "loaded_source": file }, True)
+        #             else:
+        #                 print(f"Loading is stopped due to streaming status: {self.streaming_listener.metrics.streaming_status}")
+        #                 break
+        #         else:
+        #             print(f"Ignore source {file} due to loaded.")
+
+    def __load_table(self, load_id, source_file, file_format, table_alias, target_table = None, reader_options = None, column_names = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1, streaming_processor = None, task_parameters = None):
         if not target_table:
             target_table = table_alias
 
         if re.search(r'\.(?![^`]*`)', target_table) is None:
             target_table = f"{self.config['Data']['TempSchema']}.{target_table}"
 
-        self.__get_last_load()
+        
 
         load_table_info = {
             "target_table": target_table,
@@ -1206,7 +1255,6 @@ process_functions["{field.name}"] = process_{field.name}
         }
         self.logs.post_log("Running", "load_table", {"load_table_info": load_table_info })
 
-        self.__add_streaming_listener(max_load_rows, load_table_info)
         #target_table = self.spark_session.sql(f'DESC DETAIL {target_table}').first()["name"]
         catalog = self.__get_catalog(target_table) if not self.default_catalog else self.default_catalog
         print(f"Current catalog:{catalog}")
@@ -1233,7 +1281,7 @@ process_functions["{field.name}"] = process_{field.name}
                     print(f'clear table:{target_table}')
         #spark.streams.addListener(Listener())
 
-        reader = self.__read_data(source_file, file_format, schema_dir, reader_options, column_names)
+        reader = self.__read_data(load_id, source_file, file_format, schema_dir, reader_options, column_names)
         df = reader.data
         load_id = reader.load_id
         load_time = reader.load_time
@@ -1262,39 +1310,20 @@ process_functions["{field.name}"] = process_{field.name}
             df = write_transform(df)
         df = df.partitionBy("_load_id", "_load_time")
         start_time = time.time()
-        df.option("checkpointLocation", checkpoint_dir)\
+        query = df.option("checkpointLocation", checkpoint_dir)\
         .trigger(availableNow=True)\
         .toTable(target_table)
+        self.streaming_metrics.query = query
         #query.stop()
         self.__set_task_value("task_load_info", {"table":target_table, "view": table_alias, "load_id":load_id, "load_time":str(load_time)})
         self.logs.log('operations', { "operation": f'load table:{target_table}' })
         self.logs.flush_log()
-        # self.__wait_loading_data()
-        # end_time = time.time()
-        # self.logs.post_log("Succeeded", "load_table", {"metrics":self.streaming_metrics.as_dict(), "load_table_info": load_table_info, "load_duration": end_time - start_time })
-        # self.logs.flush_log()
-        # self.logs.log("load_info", { "load_id": load_id, "status": "succeeded", "source_file": source_file, "file_format": file_format, "schema_dir": schema_dir }, True)
-        
-        load_table_info["log_dir"] = self.logs.log_file
-        load_table_info["checkpoint_dir"] = checkpoint_dir
-        load_table_info["schema_dir"] = schema_dir
-        load_table_info["load_id"] = load_id
-        load_table_info["load_time"] = load_time
-        load_table_info["start_time"] = start_time
-        #self.wait_loading_data(load_table_info)
-        return load_table_info
-
-    def wait_loading_data(self, load_table_info):
         self.__wait_loading_data()
-        load_table_info["status"] = "succeeded"
         end_time = time.time()
-        load_table_info["load_duration"] = end_time - load_table_info["start_time"]
-        load_table_info["metrics"] = self.streaming_metrics.as_dict()
-        load_table_info["load_time"] = str(load_table_info["load_time"])
-        load_table_info["start_time"] = str(load_table_info["start_time"])
-        self.logs.post_log("Succeeded", "load_table", load_table_info)
+        self.logs.post_log("Succeeded", "load_table", {"metrics":self.streaming_metrics.as_dict(), "load_table_info": load_table_info, "load_duration": end_time - start_time })
         self.logs.flush_log()
-        self.logs.log("load_info", load_table_info, True)
+        self.logs.log("load_info", { "load_id": load_id, "status": "succeeded", "source_file": source_file, "file_format": file_format, "schema_dir": schema_dir }, True)
+        return load_id
 
     def load_view(self, target_view, target_path, source_file, file_format, view_alias = None, reader_options = None, transform = None, reload_view = False, max_load_rows = -1):
         self.__add_streaming_listener(max_load_rows)
@@ -1356,11 +1385,20 @@ process_functions["{field.name}"] = process_{field.name}
 
 
     def __wait_loading_data(self):
-        while len(self.spark_session.streams.active) > 0:
-            self.spark_session.streams.resetTerminated() # Otherwise awaitAnyTermination() will return immediately after first stream has terminated
-            self.spark_session.streams.awaitAnyTermination()
-            time.sleep(0.1)
-        self.streaming_metrics.terminate()
+        pass
+        # while len(self.spark_session.streams.active) > 0:
+        #     try:
+        #         self.spark_session.streams.resetTerminated() # Otherwise awaitAnyTermination() will return immediately after first stream has terminated
+        #         self.spark_session.streams.awaitAnyTermination()
+        #     except Exception as ex:
+        #         print(f"Error: {ex}")
+        #         # self.streaming_metrics.query.stop()
+        #         # self.streaming_metrics.query.awaitTermination()
+        #         break
+        #     time.sleep(0.1)
+        # while self.streaming_metrics.query.isActive:
+        #     time.sleep(3)
+        #self.streaming_metrics.terminate()
 
     def __truncate_table(self, table, clear_type):
         try:
@@ -1433,7 +1471,7 @@ process_functions["{field.name}"] = process_{field.name}
                     table = ""
                     for part in reversed(load_info["table"].split('.')):
                         if not table:
-                            table = part
+                                table = part
                         elif not db:
                             db = part
                         else:
@@ -1652,6 +1690,8 @@ process_functions["{field.name}"] = process_{field.name}
             self.optimize_table(table_name)
             
 
+    def set_default_catalog(self, catalog):
+        self.spark_session.catalog.setCurrentCatalog(catalog)
 
     def async_merge_table(self, concurrency = 1, *args, **kwargs):
         if not hasattr(self, 'async_merge_table_pool'):
@@ -1678,28 +1718,7 @@ process_functions["{field.name}"] = process_{field.name}
             print(f"Get cluster by columns error: {ex}")
             return []
 
-    def __check_table_name(self, table_name):
-        match = re.match(r'^(?:(`[^`]+`)|([^`]+))\.(?:(`[^`]+`)|([^`]+))\.(?:(`[^`]+`)|([^`]+))$|^(?:(`[^`]+`)|([^`]+))\.(?:(`[^`]+`)|([^`]+))$', table_name)
-        if match:
-            if match.group(1) or match.group(2):
-                catalog = match.group(1) or match.group(2)
-                schema = match.group(3) or match.group(4)
-                table = match.group(5) or match.group(6)
-            else:
-                catalog = self.default_catalog
-                schema = match.group(7) or match.group(8)
-                table = match.group(9) or match.group(10)
-            return catalog, schema, table
-        
-        raise ValueError(f"Invalid target_table format: {table_name}")
-    
-    def __check_table_exist(self, target_table):
-        catalog, schema, table = self.__check_table_name(target_table)
-        tables = self.spark_session.sql(f"SHOW TABLES IN {catalog}.{schema} LIKE '{table}'").collect()
-        print(tables)
-        return len(tables) > 0 and any(row.database.lower() == schema.lower() and row.tableName.lower() == table.lower() and not row.isTemporary for row in tables)
-
-    def merge_table(self, table_aliases, target_table: str, source_table: Union[str, DataFrame], keys, mode: MergeMode, clustering = [], merge_overwrite_no_match = None, source_script = None, workflow_schema = "workflow", insert_columns = None, update_columns = None, keep_columns = None, state = 'succeeded'):
+    def merge_table(self, table_aliases, target_table: str, source_table: Union[str, DataFrame], keys, mode: MergeMode, clustering = [], merge_overwrite_no_match = None, source_script = None, schema = "workflow", insert_columns = None, update_columns = None, keep_columns = None, state = 'succeeded'):
         if source_table and isinstance(source_table, str):
             source = self.spark_session.table(source_table)
         elif source_table and isinstance(source_table, DataFrame):
@@ -1721,8 +1740,7 @@ process_functions["{field.name}"] = process_{field.name}
 
         if not update_columns:
             update_columns = source.columns 
-        #catalog, schema, table = self.__check_table_name(target_table)
-        #target_table = f"{catalog}.{schema}.{table}"
+        
         start_time = time.time()
 
         merge_info = {
@@ -1731,15 +1749,11 @@ process_functions["{field.name}"] = process_{field.name}
             "table_aliases": table_aliases
         }
         cluster_by = f"CLUSTER BY ({','.join(clustering)})" if clustering else ""
-        # self.__split_target_table(target_table)
-        # try:
-        #     self.spark_session.sql(f"SELECT 1 FROM {target_table} LIMIT 1").collect()
-        # except Exception as ex:
-        #     self.spark_session.sql(f"create table {target_table} {cluster_by} as select * from {source_table} where 1=0").collect()
-        
-        if not self.__check_table_exist(target_table):  
+        try:
+            self.spark_session.sql(f"SELECT 1 FROM {target_table} LIMIT 1").collect()
+        except Exception as ex:
             self.spark_session.sql(f"create table {target_table} {cluster_by} as select * from {source_table} where 1=0").collect()
-
+        
         if not clustering:
             clustering = []
 
@@ -1874,7 +1888,7 @@ process_functions["{field.name}"] = process_{field.name}
                 load_info_json = [row.asDict() for row in load_info_rows]
 
             load_info_catalog = f"{self.default_catalog}." if self.default_catalog else ""
-            load_info_table = f"{load_info_catalog}{workflow_schema}.table_load_info"
+            load_info_table = f"{load_info_catalog}{schema}.table_load_info"
             self.spark_session.sql(f"""
                                 CREATE TABLE IF NOT EXISTS {load_info_table} (
                                         merge_id STRING,
@@ -1990,18 +2004,23 @@ process_functions["{field.name}"] = process_{field.name}
 
 
     def __streaming_progress(self, metrics: StreamingMetrics, progress: StreamingQueryProgress, max_load_rows):
-        if max_load_rows < 0:
+        if max_load_rows <= 0:
             return
         if metrics.row_count >= max_load_rows and metrics.file_count >= max_load_rows:
             if not self.spark_session:
                 self._init_databricks()
+            # try:
+            #     metrics.stop()
+            # except Exception as ex:
+            #     print(f"Stop streaming error: {ex}")
+            print(f"Current streaming : {progress.id} {progress.runId} ")
+            print(f"Stop streaming with row count: {metrics.row_count}")
+            print(f"Stop streaming : {stream.id} {stream.runId}")
             for stream in self.spark_session.streams.active:
-                #if progress.runId == stream.runId:
-                print(f"Current streaming : {progress.id} {progress.runId} ")
-                print(f"Stop streaming with row count: {metrics.row_count}")
-                print(f"Stop streaming : {stream.id} {stream.runId}")
-                metrics.stop()
-                stream.stop()
+                try:
+                    stream.stop()
+                except Exception as ex:
+                    print(f"Stop streaming error: {ex}")
 
     def __add_streaming_listener(self, max_load_rows = -1, load_table_info = None):
         if Pipeline.streaming_listener is None:
