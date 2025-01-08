@@ -7,9 +7,11 @@ class AsyncTaskProcessor:
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
         self.futures = {}
 
-    def submit(self, key, fn, *args, **kwargs):
+    def submit(self, key, fn, callback, *args, **kwargs):
         future = self.executor.submit(fn, *args, **kwargs)
         self.futures[future] = key
+        if callback:
+            future.add_done_callback(lambda f: callback())
 
     def wait(self):
         results = {}

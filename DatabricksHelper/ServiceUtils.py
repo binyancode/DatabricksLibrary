@@ -3,6 +3,7 @@ from pyspark.sql import DataFrame, SparkSession
 from types import SimpleNamespace
 import hashlib
 import json
+from pyspark.sql.connect.dataframe import DataFrame as ConnectDataFrame
 
 class PipelineUtils:
     def __string_to_md5(self, input_string):
@@ -34,12 +35,14 @@ class PipelineUtils:
         query = None
         if isinstance(data, str):
             query = data
-        elif isinstance(data, DataFrame):
+        elif isinstance(data, ConnectDataFrame) or isinstance(data, DataFrame):
             data.createOrReplaceTempView(f"{view_name}_dataframe")
             query = f"select * from {view_name}_dataframe"
         else:
             raise Exception("Invalid data type")
         
+        self.pipeline_service.spark_session.sql(f"create schema if not exists `{schema}`").collect()
+
         user = self.pipeline_service.spark_session.sql('select current_user()').collect()[0][0].replace('@', '#').replace('.', '#')
 
         if stage_table:

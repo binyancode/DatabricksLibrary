@@ -39,6 +39,7 @@ else:
 from pyspark.sql.functions import explode, col, lit, count, max, from_json, udf, struct, approx_count_distinct
 from pyspark.sql.types import *
 from pyspark.sql import Row, DataFrame, Observation, SparkSession
+from pyspark.sql.connect.dataframe import DataFrame as ConnectDataFrame
 from pyspark.sql.streaming import StreamingQueryListener, StreamingQuery
 from pyspark.sql.streaming.listener import QueryProgressEvent, StreamingQueryProgress
 from datetime import datetime, timedelta, timezone
@@ -413,10 +414,12 @@ class LogService:
             }
             json_data = json.dumps(data, default=Functions.serialize_datetime)
             # print(self.runtime_info["config"]["Log"]["LogAPI"])
+            print("Start post log:", datetime.now())
             response = requests.post(self.runtime_info["config"]["Log"]["LogAPI"], headers={'Content-Type': 'application/json'}, data=json_data)
             if response.status_code != 200:
                 print(response.status_code)
                 print(response.json())
+            print("Finish post log:", datetime.now())
             # print(response.json())
         except Exception as e:
             print("Exception:", e)
@@ -1574,20 +1577,9 @@ process_functions["{field.name}"] = process_{field.name}
         #                 print(f'Transform {key} generated an exception: {ex}')
 
         if transform_options:
-            concurrency = transform_options.get("transform_concurrency", 1)
-            processor = AsyncTaskProcessor(max_workers=concurrency)
-
             for temp_view, temp_df in all_load_info.items():
-                processor.submit(temp_view, self.__process_transform_table, all_load_info, transform_options, temp_view, temp_df, transform_schema, streaming_processor, task_parameters)
+                self.__process_transform_table(all_load_info, transform_options, temp_view, temp_df, transform_schema, streaming_processor, task_parameters)
 
-            try:
-                results = processor.wait()
-            except Exception as ex:
-                print(f'Transform {key} generated an exception: {ex}')
-                raise ex
-            
-            for key, result in results.items():
-                print(f"Process transform {key}", result)
 
         # for temp_view, temp_df in all_load_info.items():
         #     if transform_options is not None and temp_view in transform_options and transform_options[temp_view].get("save_as_table", False):
@@ -1653,12 +1645,13 @@ process_functions["{field.name}"] = process_{field.name}
             
 
 
-    def async_merge_table(self, concurrency = 1, *args, **kwargs):
+    def async_merge_table(self, concurrency = 1, callback = None, *args, **kwargs):
         if not hasattr(self, 'async_merge_table_pool'):
             self.async_merge_table_pool = AsyncTaskProcessor(max_workers=concurrency)
         else:
             self.async_merge_table_pool.set_max_workers(concurrency)
-        self.async_merge_table_pool.submit(args, self.merge_table, *args, **kwargs)
+        key = str(uuid.uuid4())
+        self.async_merge_table_pool.submit(key, self.merge_table, callback, *args, **kwargs)
 
     def wait_async_merge_table(self):
         if hasattr(self, 'async_merge_table_pool'):
@@ -1699,10 +1692,11 @@ process_functions["{field.name}"] = process_{field.name}
         print(tables)
         return len(tables) > 0 and any(row.database.lower() == schema.lower() and row.tableName.lower() == table.lower() and not row.isTemporary for row in tables)
 
-    def merge_table(self, table_aliases, target_table: str, source_table: Union[str, DataFrame], keys, mode: MergeMode, clustering = [], merge_overwrite_no_match = None, source_script = None, workflow_schema = "workflow", insert_columns = None, update_columns = None, keep_columns = None, state = 'succeeded'):
+    #optimize_options: {"optimize": True, "vacuum": True}
+    def merge_table(self, table_aliases, target_table: str, source_table: Union[str, DataFrame], keys, mode: MergeMode, clustering = [], optimize_options = {"optimize": True, "vacuum": True}, merge_overwrite_no_match = None, source_script = None, workflow_schema = "workflow", insert_columns = None, update_columns = None, keep_columns = None, state = 'succeeded'):
         if source_table and isinstance(source_table, str):
             source = self.spark_session.table(source_table)
-        elif source_table and isinstance(source_table, DataFrame):
+        elif source_table and (isinstance(source_table, DataFrame) or isinstance(source_table, ConnectDataFrame)):
             source = source_table
             source_table = str(uuid.uuid4()).replace('-', '')
             source.createOrReplaceTempView(source_table)
@@ -1724,7 +1718,7 @@ process_functions["{field.name}"] = process_{field.name}
         #catalog, schema, table = self.__check_table_name(target_table)
         #target_table = f"{catalog}.{schema}.{table}"
         start_time = time.time()
-
+        print(f"Start merge table {target_table}: {datetime.now()}")
         merge_info = {
             "mode":mode.name,
             "target_table": target_table,
@@ -1855,6 +1849,7 @@ process_functions["{field.name}"] = process_{field.name}
                 merge_result = merge_result[0]     
         
             end_time = time.time()
+            print(f"Finish merge table {target_table}: {datetime.now()}")
 
             result = {
                 "num_affected_rows": merge_result["num_affected_rows"] if "num_affected_rows" in merge_result else 0,
@@ -1862,8 +1857,10 @@ process_functions["{field.name}"] = process_{field.name}
                 "num_deleted_rows": merge_result["num_deleted_rows"] if "num_deleted_rows" in merge_result else 0,
                 "num_inserted_rows": merge_result["num_inserted_rows"] if "num_inserted_rows" in merge_result else 0,
             }
-            self.vacuum_table(f"{target_table}")
-            self.optimize_table(f"{target_table}")
+            if optimize_options == None or optimize_options.get("optimize", True):
+                self.vacuum_table(f"{target_table}")
+            if optimize_options == None or optimize_options.get("vacuum", True):
+                self.optimize_table(f"{target_table}")
             self.logs.post_log("Succeeded", "merge_table", { "merge_info":merge_info, "merge_result": result, "merge_duration": end_time - start_time }) 
             print(merge_result)
             #for table in [table for table in self.spark_session.catalog.listTables() if table.isTemporary and table.name=='load_info']:
@@ -1873,6 +1870,7 @@ process_functions["{field.name}"] = process_{field.name}
                 load_info_rows = df_load_info.filter(df_load_info['view'].isin(table_aliases)).collect()
                 load_info_json = [row.asDict() for row in load_info_rows]
 
+            print(f"Start record merge info {target_table}: {datetime.now()}")
             load_info_catalog = f"{self.default_catalog}." if self.default_catalog else ""
             load_info_table = f"{load_info_catalog}{workflow_schema}.table_load_info"
             self.spark_session.sql(f"""
@@ -1919,14 +1917,18 @@ process_functions["{field.name}"] = process_{field.name}
                                         '{state}', 
                                         current_timestamp()
                                 """).collect()
-            self.vacuum_table(f"{load_info_table}")
-            self.optimize_table(f"{load_info_table}")
+            print(f"Finish record merge info {target_table}: {datetime.now()}")
+            if optimize_options == None or optimize_options.get("optimize", True):
+                self.vacuum_table(f"{load_info_table}")
+            if optimize_options == None or optimize_options.get("vacuum", True):
+                self.optimize_table(f"{load_info_table}")
         except Exception as ex:
             self.logs.post_log("Failed", "merge_table", { "merge_info":merge_info, "merge_result":merge_result, "exception": str(ex) }) 
             raise ex
             #[Row(num_affected_rows=10, num_updated_rows=10, num_deleted_rows=0, num_inserted_rows=0)]
 
     def vacuum_table(self, table_name, days = 1):
+        print(f"Start vacuum table {table_name}: {datetime.now()}")
         history_df = self.spark_session.sql(f"DESCRIBE HISTORY {table_name}")
         vacuum_operations = history_df.filter(history_df['operation'] == 'VACUUM END').orderBy(history_df['timestamp'].desc())
         last_vacuum_time = None
@@ -1940,9 +1942,11 @@ process_functions["{field.name}"] = process_{field.name}
             self.spark_session.sql(f"VACUUM {table_name}").collect()
             self.logs.log('operations', { "operation": f'end vacuum table:{table_name}' }, True)
             print(f"{str(datetime.now())} End VACUUM {table_name}")
+        print(f"Finish vacuum table {table_name}: {datetime.now()}")
         return last_vacuum_time
 
     def optimize_table(self, table_name, days = 1):
+        print(f"Start optimize table {table_name}: {datetime.now()}")
         history_df = self.spark_session.sql(f"DESCRIBE HISTORY {table_name}")
         optimize_operations = history_df.filter(history_df['operation'] == 'OPTIMIZE').orderBy(history_df['timestamp'].desc())
         last_optimize_time = None
@@ -1956,6 +1960,7 @@ process_functions["{field.name}"] = process_{field.name}
             self.spark_session.sql(f"OPTIMIZE {table_name}").collect()
             self.logs.log('operations', { "operation": f'end optimize table:{table_name}' }, True)
             print(f"{str(datetime.now())} End OPTIMIZE {table_name}")
+        print(f"Finish optimize table {table_name}: {datetime.now()}")
         return last_optimize_time
 
 
