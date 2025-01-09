@@ -466,10 +466,14 @@ class LogService:
         return None
 
     def read_log(self):
-        if os.path.exists(self.log_file):
-            with open(self.log_file, 'r') as file:
-                return json.load(file)
-        return {}
+        try:
+            if os.path.exists(self.log_file):
+                with open(self.log_file, 'r') as file:
+                    return json.load(file)
+            return {}
+        except Exception as e:
+            print(e)
+            return {}
 
     session_id:str
     pipeline_run_id:str
@@ -1004,87 +1008,25 @@ class Pipeline(PipelineCluster):
         return None
 
     def __table_loading_streaming_process(self, validation_col_name, table_alias, df, streaming_processor = None, task_parameters = None):
-        if streaming_processor:
+        if streaming_processor and isinstance(streaming_processor, str):
             path = streaming_processor
         elif self.task and self.job:
             path = os.path.join(self.config["Data"]["StreamingProcessor"]["Path"], self.job.settings.name, f"{self.task.task_key}")
         else:
             path = None
         print(f"Streaming processor path: {path}")   
-        # locals_before = dict(locals())
-        # # if os.path.exists(path):
-        # #     with open(path, 'r') as file:
-        # #         # globals_dict = globals()
-        # #         # globals_dict['TableLoadingValidation'] = TableLoadingValidation
-        # #         exec(file.read())
-        # #         print(f"Streaming processor file loaded")
-        # # try:
-        # #     self.run_notebook(path)
-        # # except Exception as ex:
-        # #     print(f"Cannot load streaming processor file: {ex}")
-        # streaming_processor_obj = None
-        # try:
-        #     # export:ExportResponse = self.workspace.workspace.export(path, format=ExportFormat.SOURCE)
-        #     # decoded_bytes = base64.b64decode(export.content)
-        #     # decoded_string = decoded_bytes.decode("utf-8")
-        #     if path:
-        #         #print(notebook)
-        #         exec(notebook_code)
-        #     else:
-        #         print(f"Streaming processor file not found")
-        # except Exception as ex:
-        #     print(f"Cannot load streaming processor file: {ex}")
-
-        # locals_after = dict(locals())
-        # new_locals = {k: v for k, v in locals_after.items() if k not in locals_before}
-        # new_classes = {name: obj for name, obj in new_locals.items() if isinstance(obj, (type)) or callable(obj)}
-
-        # streaming_processor_type = None
-        # streaming_processor_obj = None
-        # globals_dict = globals()
-        # for name, tp in new_classes.items():
-        #     if isinstance(tp, (type)) and issubclass(tp, TableLoadingStreamingProcessor) and tp is not TableLoadingStreamingProcessor:
-        #         streaming_processor_type = tp
-        #     elif tp is not TableLoadingStreamingProcessor:
-        #         globals_dict[name] = tp
-        #         print(f"Global object registered: {name}, {tp}")
+        
         notebook_code = None
         if path and os.path.exists(path):
             notebook_code = self.get_notebook(path)
-        streaming_processor_obj = Pipeline.__get_streaming_processor_object(table_alias, notebook_code, task_parameters)
-        # if streaming_processor_obj:
-        #     init_obj = streaming_processor_obj.init()
-        #     print(f"Streaming processor object loaded: {streaming_processor_obj}")
 
-        # module_name = "streaming_processor_module"
-        # if module_name not in sys.modules:
-        #     streaming_processor_module = types.ModuleType(module_name)
-        #     exec(notebook_code, streaming_processor_module.__dict__)
-        #     sys.modules[module_name] = streaming_processor_module
-        #     importlib.import_module(module_name)
-
-        # module_name = streaming_processor_module_name
-        # with open(f"/Volumes/evacatalog/workflow/logs/{module_name}.py", 'w') as file:
-        #     file.write(notebook_code)
-        # spec = importlib.util.spec_from_file_location(module_name, f"/Volumes/evacatalog/workflow/logs/{module_name}.py")
-        # module = importlib.util.module_from_spec(spec)
-        # sys.modules[module_name] = module
-        # spec.loader.exec_module(module)
-        # importlib.import_module(module_name)
-        # for name, obj in inspect.getmembers(module, inspect.isclass):
-        #     if issubclass(obj, TableLoadingStreamingProcessor) and obj is not TableLoadingStreamingProcessor:
-        #         streaming_processor_type = obj
-
-
-        # if streaming_processor_type:
-        #     streaming_processor_obj = streaming_processor_type()
-        #     streaming_processor_obj.init()
-        #     print(f"Streaming processor object loaded: {streaming_processor_obj}")
-        # for name, obj in globals().items():
-        #     if isinstance(obj, type):  # 确保是一个类
-        #         if issubclass(obj, TableLoadingValidation) and obj is not TableLoadingValidation:  # 检查是否是A的子类，排除A本身
-        #             validation_obj = obj()
-        #             print(f"Validation object loaded: {validation_obj}")
+        if streaming_processor and isinstance(streaming_processor, TableLoadingStreamingProcessor):
+            streaming_processor_obj = streaming_processor
+            streaming_processor_obj.init(table_alias, task_parameters)
+        elif notebook_code:
+            streaming_processor_obj = Pipeline.__get_streaming_processor_object(table_alias, notebook_code, task_parameters)
+        else:
+            streaming_processor_obj = None
 
         validation_schema = StructType([
             StructField("is_valid", BooleanType(), True),
@@ -1116,7 +1058,14 @@ class Pipeline(PipelineCluster):
             #     exec(notebook_code, streaming_processor_module.__dict__)
             #     sys.modules[module_name] = streaming_processor_module
             #     importlib.import_module(module_name)
-            streaming_processor_obj = Pipeline.__get_streaming_processor_object(table_alias, notebook_code, task_parameters)
+            if streaming_processor and isinstance(streaming_processor, TableLoadingStreamingProcessor):
+                streaming_processor_obj = streaming_processor
+                streaming_processor_obj.init(table_alias, task_parameters)
+            elif notebook_code:
+                streaming_processor_obj = Pipeline.__get_streaming_processor_object(table_alias, notebook_code, task_parameters)
+            else:
+                streaming_processor_obj = None
+            
             is_valid = True
 
             validation = {}
@@ -1403,8 +1352,8 @@ process_functions["{field.name}"] = process_{field.name}
     #reload_info: {"businesspartner":"evacatalog.temp.businesspartner", "condition":"_load_id = 'xxx'"}
     #rekoad_info: {"businesspartner":{"query":"select * from evacatalog.temp.businesspartner where substring(`_source_metadata`.file_modification_time,1,10) >'2024-10-13'", "batch_size":10000, "partition_size":50}}
     #task_load_info: {"table": "temp.businesspartner", "view": "businesspartner", "load_id": "c99a7f26-6dcd-47e2-bb45-2bbc6ae0e906"}
-    #transform_options: { "transform_concurrency": 8, transforms:{"businesspartner": {"save_as_table": True}}}
-    def get_load_info(self, transform_schema = None, schema = None, debug = None, transform = None, task_load_info = None, reload_info = None, load_option = None, transform_options = None, streaming_processor = None, task_parameters = None):
+    #transform_options: { transforms:{"businesspartner": {"save_as_table": True, "streaming_processor": None, "optimize_options": {"vacuum": False, "optimize": False}}}}
+    def get_load_info(self, transform_schema = None, schema = None, debug = None, transform = None, task_load_info = None, reload_info = None, load_option = None, transform_options = None, task_parameters = None):
         #context = self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext()
         if not transform_schema:
             if "TransformSchema" in self.config["Data"]:
@@ -1578,7 +1527,7 @@ process_functions["{field.name}"] = process_{field.name}
 
         if transform_options:
             for temp_view, temp_df in all_load_info.items():
-                self.__process_transform_table(all_load_info, transform_options, temp_view, temp_df, transform_schema, streaming_processor, task_parameters)
+                self.__process_transform_table(all_load_info, transform_options, temp_view, temp_df, transform_schema, task_parameters)
 
 
         # for temp_view, temp_df in all_load_info.items():
@@ -1600,16 +1549,23 @@ process_functions["{field.name}"] = process_{field.name}
         #load.load = MethodType(lambda this,table:self.load_temp_table(table), load)
         return load
 
-    def __process_transform_table(self, all_load_info, transform_options, temp_view, temp_df, transform_schema, streaming_processor, task_parameters):
+    def __process_transform_table(self, all_load_info, transform_options, temp_view, temp_df, transform_schema, task_parameters):
+        #print(transform_options, temp_view, transform_options.get("transforms", {}).get(temp_view, {}).get("save_as_table", False))
         if transform_options and transform_options.get("transforms", {}).get(temp_view, {}).get("save_as_table", False):
             retention = transform_options.get("transforms", {}).get(temp_view, {}).get("retention", 90)
-            if temp_view.startswith("__") or not isinstance(temp_df, DataFrame):
+            if temp_view.startswith("__") or not (isinstance(temp_df, DataFrame) or isinstance(temp_df, ConnectDataFrame)):
                 return
-            
+            print(f"{datetime.now()} Process transform {temp_view}")
+            transform_schema = transform_options.get("transforms", {}).get(temp_view, {}).get("schema", transform_schema)
+            self.spark_session.sql(f"create schema if not exists `{transform_schema}`").collect()
+
+            streaming_processor = transform_options.get("transforms", {}).get(temp_view, {}).get("streaming_processor", None)
             temp_df = self.__table_loading_streaming_process("_validations_transform", temp_view, temp_df, streaming_processor = streaming_processor, task_parameters = task_parameters)
             
-            self.__save_transform_table(temp_df, temp_view, transform_schema, retention)
-
+            print(f"{datetime.now()} Save transform table {temp_view}")
+            optimize_options = transform_options.get("transforms", {}).get(temp_view, {}).get("optimize_options", None)
+            self.__save_transform_table(temp_df, temp_view, transform_schema, optimize_options, retention)
+            print(f"{datetime.now()} Load transform table {temp_view}")
             load_id = all_load_info[f"__{temp_view}_info"].load_id
             temp_df = self.spark_session.sql(f"select * from {self.default_catalog}.{transform_schema}.{temp_view} where _load_id = '{load_id}' and _validations.is_valid = TRUE and _validations_transform.is_valid = TRUE")
             temp_df.createOrReplaceTempView(temp_view)
@@ -1617,7 +1573,13 @@ process_functions["{field.name}"] = process_{field.name}
             return True
         return False
 
-    def __save_transform_table(self, temp_df, temp_view, transform_schema, retention = -1):
+
+    def __compare_structures(df1, df2):
+        dataframe_structure1 = {field.name: field.dataType.simpleString() for field in df1.schema.fields}
+        dataframe_structure2 = {field.name: field.dataType.simpleString() for field in df2.schema.fields}
+        return dataframe_structure1 == dataframe_structure2
+
+    def __save_transform_table(self, temp_df, temp_view, transform_schema, optimize_options, retention = -1):
         try:
             table_name = f"{self.default_catalog}.{transform_schema}.{temp_view}"
             temp_df.write \
@@ -1630,18 +1592,21 @@ process_functions["{field.name}"] = process_{field.name}
                 self.clear_table([table_name], (datetime.now() - timedelta(days=retention)).strftime("%Y-%m-%d"))
         except Exception as ex:
             print(f"Save as table error: {ex}")
-            new_table_name = f"{self.default_catalog}.{transform_schema}.{temp_view}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{str(uuid.uuid4()).replace('-', '')}"
-            self.spark_session.sql(f"ALTER TABLE {table_name} RENAME TO {new_table_name}")
-            print(f"Rename transform table from {temp_view} to {new_table_name}")
-            temp_df.write \
-            .mode("overwrite") \
-            .option("partitionOverwriteMode", "dynamic") \
-            .option("mergeSchema", "true") \
-            .partitionBy("_load_id", "_load_time") \
-            .saveAsTable(table_name)
+            if not self.__compare_structures(temp_df, self.spark_session.table(table_name)):
+                new_table_name = f"{self.default_catalog}.{transform_schema}.{temp_view}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{str(uuid.uuid4()).replace('-', '')}"
+                self.spark_session.sql(f"ALTER TABLE {table_name} RENAME TO {new_table_name}")
+                print(f"Rename transform table from {temp_view} to {new_table_name}")
+                temp_df.write \
+                .mode("overwrite") \
+                .option("partitionOverwriteMode", "dynamic") \
+                .option("mergeSchema", "true") \
+                .partitionBy("_load_id", "_load_time") \
+                .saveAsTable(table_name)
         finally:
-            self.vacuum_table(table_name)
-            self.optimize_table(table_name)
+            if optimize_options == None or optimize_options.get("vacuum", True):
+                self.vacuum_table(table_name)
+            if optimize_options == None or optimize_options.get("optimize", True):
+                self.optimize_table(table_name)
             
 
 
