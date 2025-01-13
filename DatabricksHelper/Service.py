@@ -398,7 +398,7 @@ class LogService:
                 "category": "databricks",
                 "subcategory": "workflow" if self.runtime_info["job"] is not None else "notebook",
                 "service": self.runtime_info["host"],
-                "instance": self.runtime_info["cluster"].cluster_id,
+                "instance": self.runtime_info["pipeline_name"],
                 "state": state,
                 "message": {
                     "pipeline_run_id": self.pipeline_run_id,
@@ -408,6 +408,7 @@ class LogService:
                     "task_key": self.runtime_info["task"].task_key if self.runtime_info["task"] is not None else None,
                     "notebook_path": self.runtime_info["context"]["notebook_path"],
                     "cluster_name": self.runtime_info["cluster"].cluster_name,
+                    "cluster_id": self.runtime_info["cluster"].cluster_id,
                     "type": type,
                     "content": content
                 }
@@ -1114,7 +1115,7 @@ process_functions["{field.name}"] = process_{field.name}
                 df = df.withColumn(field.name, process_functions[field.name](struct([df[col] for col in df.columns]), lit(field.name), df[validation_col_name]))
         return df
 
-    def load_table(self, source_file, file_format, table_alias, target_table = None, reader_options = None, column_names = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1, streaming_processor = None, task_parameters = None):
+    def load_table(self, source_file, file_format, table_alias, target_table = None, reader_options = None, writer_options = None, column_names = None, transform = None, reload_table:Reload = Reload.DEFAULT, max_load_rows = -1, streaming_processor = None, task_parameters = None):
         source_file = self.__parse_task_param(source_file)
         target_table = self.__parse_task_param(target_table)
         file_format = self.__parse_task_param(file_format)
@@ -1214,6 +1215,9 @@ process_functions["{field.name}"] = process_{field.name}
             df = write_transform(df)
         df = df.partitionBy("_load_id", "_load_time")
         start_time = time.time()
+        if writer_options is not None:
+            for key, value in writer_options.items():
+                df = df.option(key, value)
         df.option("checkpointLocation", checkpoint_dir)\
         .trigger(availableNow=True)\
         .toTable(target_table)
@@ -1575,8 +1579,8 @@ process_functions["{field.name}"] = process_{field.name}
 
 
     def __compare_structures(df1, df2):
-        dataframe_structure1 = {field.name: field.dataType.simpleString() for field in df1.schema.fields}
-        dataframe_structure2 = {field.name: field.dataType.simpleString() for field in df2.schema.fields}
+        dataframe_structure1 = {field.name: field.dataType.simpleString() for field in sorted(df1.schema.fields, key=lambda x: x.name)}
+        dataframe_structure2 = {field.name: field.dataType.simpleString() for field in sorted(df2.schema.fields, key=lambda x: x.name)}
         return dataframe_structure1 == dataframe_structure2
 
     def __save_transform_table(self, temp_df, temp_view, transform_schema, optimize_options, retention = -1):
@@ -1602,6 +1606,8 @@ process_functions["{field.name}"] = process_{field.name}
                 .option("mergeSchema", "true") \
                 .partitionBy("_load_id", "_load_time") \
                 .saveAsTable(table_name)
+            else:
+                raise ex
         finally:
             if optimize_options == None or optimize_options.get("vacuum", True):
                 self.vacuum_table(table_name)
