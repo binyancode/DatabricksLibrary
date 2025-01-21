@@ -1,6 +1,7 @@
 import setuptools
 import os
 import datetime
+import shutil
 
 def read_version():
     with open('version.txt', 'r') as file:
@@ -27,11 +28,18 @@ def write_library_version(version):
             if line.startswith('__version__'):
                 line = f"__version__ = '{version}'\n"
             fh.write(line)
+            
+def backup_databricks_helper(version):
+    src_folder = "DatabricksHelper"
+    dst_folder = f"Backup/DatabricksHelper_{version}"
+    shutil.copytree(src_folder, dst_folder)
 
 current_version = read_version()
 new_version = increment_version(current_version)
 write_version(new_version)
 write_library_version(new_version)
+
+backup_databricks_helper(new_version)
 
 with open("README.md", "r") as fh:
     long_description = fh.read()

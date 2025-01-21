@@ -338,6 +338,8 @@ class PipelineService:
             print("Using personal access token")
         self.api = PipelineAPI(host=self.host, token=token)
         self.catalog = self.config["Data"]["Catalog"]
+        self.log_api = self.databricks_dbutils.secrets.get(scope=self.config["Log"]["LogAPI"]["Scope"], key=self.config["Log"]["LogAPI"]["Url"])
+
         context = json.loads(self.databricks_dbutils.notebook.entry_point.getDbutils().notebook().getContext().safeToJson())
         # run_wait = self.workspace.jobs.repair_run(run_id=0, latest_repair_id=0, rerun_all_failed_tasks=True)
         # run_wait.result()
@@ -416,10 +418,10 @@ class LogService:
             json_data = json.dumps(data, default=Functions.serialize_datetime)
             # print(self.runtime_info["config"]["Log"]["LogAPI"])
             print("Start post log:", datetime.now())
-            response = requests.post(self.runtime_info["config"]["Log"]["LogAPI"], headers={'Content-Type': 'application/json'}, data=json_data)
+            response = requests.post(self.runtime_info["log_api"], headers={'Content-Type': 'application/json'}, data=json_data)
             if response.status_code != 200:
                 print(response.status_code)
-                print(response.json())
+                print(response)
             print("Finish post log:", datetime.now())
             # print(response.json())
         except Exception as e:
@@ -2018,7 +2020,8 @@ process_functions["{field.name}"] = process_{field.name}
             "job":self.job, 
             "task":self.task, 
             "catalog":self.catalog, 
-            "default_catalog": self.default_catalog 
+            "default_catalog": self.default_catalog,
+            "log_api": self.log_api
         }
         return LogService(self.session_id, self.pipeline_run_id, log_path, runtime_info)
 
