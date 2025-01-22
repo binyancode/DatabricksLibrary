@@ -162,7 +162,6 @@ class PipelineSpark:
 
     def __init__(self, spark:SparkSession = None):
         self.spark_session:SparkSession = spark
-        self._init_databricks()
 
 class PipelineService(PipelineSpark):
     def _delete_all_files_and_folders(self, directory_path):
@@ -463,9 +462,7 @@ class LogService:
         try:
             log_dir = self.log_path
             flushed = False
-            retry_count = 0
-            max_retries = 3
-            while not flushed and retry_count < max_retries:
+            while not flushed:
                 try:
                     if not os.path.exists(log_dir):
                         os.makedirs(log_dir)
@@ -474,7 +471,6 @@ class LogService:
                         flushed = True
                 except Exception as e:#OSError as e:
                     print(log_dir, e)
-                    retry_count += 1
         finally:
             self.__lock.release()
 
@@ -517,34 +513,30 @@ class LogService:
 
 class TableService(PipelineSpark):
     __lock = threading.Lock()
-    last_vacuum_time:datetime = None
-    last_optimize_time:datetime = None
+    last_vacuum_time:datetime
+    last_optimize_time:datetime
 
     def vacuum(self, days = 7):
         if self.last_vacuum_time is None or (datetime.now() - self.last_vacuum_time).days >= days:
-            print(f"Vacuum table {self.table_name}, last vacuum time: {self.last_vacuum_time}")
             self.spark_session.sql(f"VACUUM {self.table_name}").collect()
             self.last_vacuum_time = datetime.now()
             self.__write_state()
             return True
-        print(f"Ignore vacuum table {self.table_name}, last vacuum time: {self.last_vacuum_time}")
         return False
     
     def optimize(self, days = 7):
         if self.last_optimize_time is None or (datetime.now() - self.last_optimize_time).days >= days:
-            print(f"Optimize table {self.table_name}, last optimize time: {self.last_optimize_time}")
             self.spark_session.sql(f"OPTIMIZE {self.table_name}").collect()
             self.last_optimize_time = datetime.now()
             self.__write_state()
             return True
-        print(f"Ignore optimize table {self.table_name}, last optimize time: {self.last_optimize_time}")
         return False
 
     def __write_state(self):
         self.__lock.acquire()
         try:
-            self.state["last_vacuum_time"] = self.last_vacuum_time.strftime('%Y-%m-%d %H:%M:%S') if self.last_vacuum_time is not None else None
-            self.state["last_optimize_time"] = self.last_optimize_time.strftime('%Y-%m-%d %H:%M:%S') if self.last_optimize_time is not None else None
+            self.state["last_vacuum_time"] = self.last_vacuum_time.strftime('%Y-%m-%d %H:%M:%S')
+            self.state["last_optimize_time"] = self.last_optimize_time.strftime('%Y-%m-%d %H:%M:%S')
             self.state["table_name"] = self.table_name
             flushed = False
             retry_count = 0
@@ -554,7 +546,7 @@ class TableService(PipelineSpark):
                     if not os.path.exists(self.state_path):
                         os.makedirs(self.state_path)
                     with open(self.state_file, 'w') as file:
-                        file.write(json.dumps(self.state, indent=4))
+                        file.write(json.dumps(self.logs, indent=4))
                         flushed = True
                 except Exception as e:#OSError as e:
                     print(self.state_path, e)
@@ -579,11 +571,10 @@ class TableService(PipelineSpark):
         if "last_optimize_time" in self.state:
             self.last_optimize_time = datetime.strptime(self.state["last_optimize_time"], '%Y-%m-%d %H:%M:%S')
 
-    def __init__(self, table_name, state_path, spark = None):
-        super().__init__(spark)
+    def __init__(self, table_name, state_path):
         self.table_name = table_name
-        self.state_path = os.path.join(state_path, f"tables")
-        self.state_file = os.path.join(self.state_path, f"{table_name}.json")
+        self.state_path = state_path
+        self.state_file = os.path.join(state_path, f"TableService/{table_name}.json")
         self.__init_state()
 
 class StreamingMetrics:
@@ -1993,47 +1984,41 @@ process_functions["{field.name}"] = process_{field.name}
             raise ex
             #[Row(num_affected_rows=10, num_updated_rows=10, num_deleted_rows=0, num_inserted_rows=0)]
 
-    def vacuum_table(self, table_name, days = 7):
+    def vacuum_table(self, table_name, days = 1):
         print(f"Start vacuum table {table_name}: {datetime.now()}")
-        state_path = os.path.join(self.config["Log"]["Path"], self.default_catalog if self.default_catalog else "")
-        t = TableService(table_name, state_path)
-        t.vacuum(days)
-        # history_df = self.spark_session.sql(f"DESCRIBE HISTORY {table_name}")
-        # vacuum_operations = history_df.filter(history_df['operation'] == 'VACUUM END').orderBy(history_df['timestamp'].desc())
-        # last_vacuum_time = None
-        # if vacuum_operations.count() > 0:
-        #     last_vacuum_time = vacuum_operations.first()['timestamp']
-        #     print(f"Last VACUUM {table_name}: {last_vacuum_time}")
+        history_df = self.spark_session.sql(f"DESCRIBE HISTORY {table_name}")
+        vacuum_operations = history_df.filter(history_df['operation'] == 'VACUUM END').orderBy(history_df['timestamp'].desc())
+        last_vacuum_time = None
+        if vacuum_operations.count() > 0:
+            last_vacuum_time = vacuum_operations.first()['timestamp']
+            print(f"Last VACUUM {table_name}: {last_vacuum_time}")
 
-        # if last_vacuum_time == None or datetime.now() - last_vacuum_time > timedelta(days=days):
-        #     print(f"{str(datetime.now())} Begin VACUUM {table_name}")
-        #     self.logs.log('operations', { "operation": f'begin vacuum table:{table_name}' }, True)
-        #     self.spark_session.sql(f"VACUUM {table_name}").collect()
-        #     self.logs.log('operations', { "operation": f'end vacuum table:{table_name}' }, True)
-        #     print(f"{str(datetime.now())} End VACUUM {table_name}")
+        if last_vacuum_time == None or datetime.now() - last_vacuum_time > timedelta(days=days):
+            print(f"{str(datetime.now())} Begin VACUUM {table_name}")
+            self.logs.log('operations', { "operation": f'begin vacuum table:{table_name}' }, True)
+            self.spark_session.sql(f"VACUUM {table_name}").collect()
+            self.logs.log('operations', { "operation": f'end vacuum table:{table_name}' }, True)
+            print(f"{str(datetime.now())} End VACUUM {table_name}")
         print(f"Finish vacuum table {table_name}: {datetime.now()}")
-        return t.last_vacuum_time
+        return last_vacuum_time
 
-    def optimize_table(self, table_name, days = 7):
+    def optimize_table(self, table_name, days = 1):
         print(f"Start optimize table {table_name}: {datetime.now()}")
-        state_path = os.path.join(self.config["Log"]["Path"], self.default_catalog if self.default_catalog else "")
-        t = TableService(table_name, state_path)
-        t.optimize(days)
-        # history_df = self.spark_session.sql(f"DESCRIBE HISTORY {table_name}")
-        # optimize_operations = history_df.filter(history_df['operation'] == 'OPTIMIZE').orderBy(history_df['timestamp'].desc())
-        # last_optimize_time = None
-        # if optimize_operations.count() > 0:
-        #     last_optimize_time = optimize_operations.first()['timestamp']
-        #     print(f"Last OPTIMIZE {table_name}: {last_optimize_time}")
+        history_df = self.spark_session.sql(f"DESCRIBE HISTORY {table_name}")
+        optimize_operations = history_df.filter(history_df['operation'] == 'OPTIMIZE').orderBy(history_df['timestamp'].desc())
+        last_optimize_time = None
+        if optimize_operations.count() > 0:
+            last_optimize_time = optimize_operations.first()['timestamp']
+            print(f"Last OPTIMIZE {table_name}: {last_optimize_time}")
         
-        # if last_optimize_time == None or datetime.now() - last_optimize_time > timedelta(days=days):
-        #     print(f"{str(datetime.now())} Begin OPTIMIZE {table_name}")
-        #     self.logs.log('operations', { "operation": f'begin optimize table:{table_name}' }, True)
-        #     self.spark_session.sql(f"OPTIMIZE {table_name}").collect()
-        #     self.logs.log('operations', { "operation": f'end optimize table:{table_name}' }, True)
-        #     print(f"{str(datetime.now())} End OPTIMIZE {table_name}")
+        if last_optimize_time == None or datetime.now() - last_optimize_time > timedelta(days=days):
+            print(f"{str(datetime.now())} Begin OPTIMIZE {table_name}")
+            self.logs.log('operations', { "operation": f'begin optimize table:{table_name}' }, True)
+            self.spark_session.sql(f"OPTIMIZE {table_name}").collect()
+            self.logs.log('operations', { "operation": f'end optimize table:{table_name}' }, True)
+            print(f"{str(datetime.now())} End OPTIMIZE {table_name}")
         print(f"Finish optimize table {table_name}: {datetime.now()}")
-        return t.last_optimize_time
+        return last_optimize_time
 
 
     def clear_table(self, table_names, earlist_time):

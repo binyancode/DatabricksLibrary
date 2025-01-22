@@ -463,9 +463,7 @@ class LogService:
         try:
             log_dir = self.log_path
             flushed = False
-            retry_count = 0
-            max_retries = 3
-            while not flushed and retry_count < max_retries:
+            while not flushed:
                 try:
                     if not os.path.exists(log_dir):
                         os.makedirs(log_dir)
@@ -474,7 +472,6 @@ class LogService:
                         flushed = True
                 except Exception as e:#OSError as e:
                     print(log_dir, e)
-                    retry_count += 1
         finally:
             self.__lock.release()
 
