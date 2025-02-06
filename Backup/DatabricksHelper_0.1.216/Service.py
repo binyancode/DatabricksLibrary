@@ -555,8 +555,8 @@ class TableService(PipelineSpark):
                         os.makedirs(self.state_path)
                     with open(self.state_file, 'w') as file:
                         file.write(json.dumps(self.state, indent=4))
+                        self.__init_state()
                         flushed = True
-                    self.__init_state()
                 except Exception as e:#OSError as e:
                     print(self.state_path, e)
                     retry_count += 1
@@ -570,22 +570,20 @@ class TableService(PipelineSpark):
                     return json.load(file)
             return {}
         except Exception as e:
-            print(self.state_file, e)
+            print(e)
             return {}
 
     def __init_state(self):
         self.state = self.__read_state()
-        # self.last_vacuum_time = self.state.get("last_vacuum_time", None)
-        # self.last_optimize_time = self.state.get("last_optimize_time", None)
-        if self.state.get("last_vacuum_time", None) is not None:
+        if "last_vacuum_time" in self.state:
             self.last_vacuum_time = datetime.strptime(self.state["last_vacuum_time"], '%Y-%m-%d %H:%M:%S')
-        if self.state.get("last_optimize_time", None) is not None:
+        if "last_optimize_time" in self.state:
             self.last_optimize_time = datetime.strptime(self.state["last_optimize_time"], '%Y-%m-%d %H:%M:%S')
 
     def __init__(self, table_name, state_path, spark = None):
         super().__init__(spark)
         self.table_name = table_name
-        self.state_path = os.path.join(state_path, f"table")
+        self.state_path = os.path.join(state_path, f"tables")
         self.state_file = os.path.join(self.state_path, f"{table_name}.json")
         self.__init_state()
 
@@ -1220,7 +1218,6 @@ process_functions["{field.name}"] = process_{field.name}
         table_alias = self.__parse_task_param(table_alias)
         reader_options = self.__parse_task_param(reader_options)
         column_names = self.__parse_task_param(column_names)
-        writer_options = self.__parse_task_param(writer_options)
         max_load_rows = int(self.__parse_task_param(max_load_rows))
         reload_table = self.__parse_task_param(reload_table)
         streaming_processor = self.__parse_task_param(streaming_processor)
@@ -1234,7 +1231,6 @@ process_functions["{field.name}"] = process_{field.name}
         print(f"column_names:{column_names}")
         print(f"max_load_rows:{max_load_rows}")
         print(f"transform:{transform}")
-        print(f"writer_options:{writer_options}")
         print(f"reload_table:{reload_table}")
         print(f"streaming_processor:{streaming_processor}")
         print(f"task_parameters:{task_parameters}")
@@ -2127,7 +2123,7 @@ process_functions["{field.name}"] = process_{field.name}
             "default_catalog": self.default_catalog,
             "log_api": self.log_api
         }
-        return LogService(self.session_id, self.pipeline_run_id if self.pipeline_run_id else f"autogeneration_{uuid.uuid4()}", log_path, runtime_info)
+        return LogService(self.session_id, self.pipeline_run_id, log_path, runtime_info)
 
     # spark_session:SparkSession
     # cluster:ClusterDetails

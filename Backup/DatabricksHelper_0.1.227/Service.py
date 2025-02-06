@@ -2127,7 +2127,7 @@ process_functions["{field.name}"] = process_{field.name}
             "default_catalog": self.default_catalog,
             "log_api": self.log_api
         }
-        return LogService(self.session_id, self.pipeline_run_id if self.pipeline_run_id else f"autogeneration_{uuid.uuid4()}", log_path, runtime_info)
+        return LogService(self.session_id, self.pipeline_run_id, log_path, runtime_info)
 
     # spark_session:SparkSession
     # cluster:ClusterDetails

@@ -1220,7 +1220,6 @@ process_functions["{field.name}"] = process_{field.name}
         table_alias = self.__parse_task_param(table_alias)
         reader_options = self.__parse_task_param(reader_options)
         column_names = self.__parse_task_param(column_names)
-        writer_options = self.__parse_task_param(writer_options)
         max_load_rows = int(self.__parse_task_param(max_load_rows))
         reload_table = self.__parse_task_param(reload_table)
         streaming_processor = self.__parse_task_param(streaming_processor)
@@ -2127,7 +2126,7 @@ process_functions["{field.name}"] = process_{field.name}
             "default_catalog": self.default_catalog,
             "log_api": self.log_api
         }
-        return LogService(self.session_id, self.pipeline_run_id if self.pipeline_run_id else f"autogeneration_{uuid.uuid4()}", log_path, runtime_info)
+        return LogService(self.session_id, self.pipeline_run_id, log_path, runtime_info)
 
     # spark_session:SparkSession
     # cluster:ClusterDetails
