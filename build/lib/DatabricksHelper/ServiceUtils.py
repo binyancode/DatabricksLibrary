@@ -76,7 +76,7 @@ class PipelineUtils:
     
     def init_run_load_job_params(self):
         params = self.init_common_params(["job_name", "target_table", "source_file", "file_format", "table_alias", \
-                                          "reader_options","column_names", "writer_options", "reload_table", "max_load_rows", ("continue_run", "True", "bool"), \
+                                          "reader_options","column_names", "read_transform", "writer_options", "reload_table", "max_load_rows", ("continue_run", "True", "bool"), \
                                             ("timeout", "3600", "int"), "notebook_path", ("notebook_timeout", "-1", "int")], False)
         # parameter_list = ["pipeline_run_id", "pipeline_name", "job_name", "default_catalog", "target_table", \
         #                   "source_file", "file_format", "table_alias", "reader_options", "reload_table", \
@@ -94,8 +94,10 @@ class PipelineUtils:
 
     def init_load_params(self):
         params = self.init_common_params(["target_table","source_file", "file_format", "table_alias", \
-                                          ("reader_options","{}","json.loads"),"column_names", ("writer_options","{}","json.loads"), ("reload_table", "Reload.DEFAULT"), \
-                                            "max_load_rows", "validation"], False)
+                                        ("reader_options","{}","json.loads"),"column_names", \
+                                        ("read_transform","{}","json.loads"), \
+                                        ("writer_options","{}","json.loads"), ("reload_table", "Reload.DEFAULT"), \
+                                        "max_load_rows", "validation"], False)
         # parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "target_table", \
         #                   "source_file", "file_format", "table_alias", ("reader_options","{}","json.loads"), \
         #                     ("reload_table", "Reload.DEFAULT"), ("max_load_rows", "-1", "int"), "validation", "task_parameters"]
@@ -113,7 +115,7 @@ class PipelineUtils:
         return params
 
     def init_run_load_notebook_params(self):
-        params = self.init_common_params(["notebook_path", ("notebook_timeout", "-1", "int"), "task_load_info", "reload_info"], False)
+        params = self.init_common_params(["table_alias", "notebook_path", ("notebook_timeout", "-1", "int"), "task_load_info", "reload_info"], False)
         #parameter_list = ["pipeline_run_id", "pipeline_name", "default_catalog", "notebook_path", ("notebook_timeout", "-1", "int"), "task_load_info", "task_parameters"]
         #params = self.__init_params(parameter_list)
         #params = SimpleNamespace(**params)

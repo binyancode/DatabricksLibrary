@@ -1,4 +1,4 @@
-import importlib
+﻿import importlib
 import importlib.util
 from typing import Tuple
 
@@ -27,16 +27,16 @@ print("databricks sdk version:", databricks.sdk.version.__version__)
 if check_class_in_module('databricks.sdk.service.compute', 'ClusterDetails'):
     from databricks.sdk.service.workspace import ExportFormat, ExportResponse
     from databricks.sdk.service.compute import ClusterDetails, ClusterSpec, Library, PythonPyPiLibrary 
-    from databricks.sdk.service.jobs import Run, Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, JobCluster, JobSettings, NotebookTask
+    from databricks.sdk.service.jobs import BaseRun, Run, Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, JobCluster, JobSettings, NotebookTask
 else:
     from databricks.sdk.service.workspace import ExportFormat, ExportResponse
     from databricks.sdk.service.compute import ClusterInfo as ClusterDetails, Library, PythonPyPiLibrary 
-    from databricks.sdk.service.jobs import BaseClusterInfo as ClusterSpec, Run, JobTaskSettings as Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, JobCluster, JobSettings, NotebookTask
+    from databricks.sdk.service.jobs import BaseClusterInfo as ClusterSpec, BaseRun, Run, JobTaskSettings as Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, JobCluster, JobSettings, NotebookTask
 
 
 #from databricks.sdk.service.compute import ClusterDetails, ClusterSpec, Library, PythonPyPiLibrary 
 #from databricks.sdk.service.jobs import Run, Task, Job, RunNowResponse, Wait, RunResultState, RunLifeCycleState, RunType, JobCluster, JobSettings, NotebookTask
-from pyspark.sql.functions import explode, col, lit, count, max, from_json, udf, struct, approx_count_distinct
+from pyspark.sql.functions import *
 from pyspark.sql.types import *
 from pyspark.sql import Row, DataFrame, Observation, SparkSession
 from pyspark.sql.connect.dataframe import DataFrame as ConnectDataFrame
@@ -47,7 +47,7 @@ from dateutil.relativedelta import relativedelta
 from urllib.parse import unquote
 from enum import IntFlag
 from types import SimpleNamespace, MethodType
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, Optional, Tuple, Union, Iterator
 from abc import ABC, abstractmethod
 from delta.tables import *
 import sys
@@ -410,14 +410,16 @@ class PipelineService(PipelineSpark):
 class LogService:
     __lock = threading.Lock()
 
-    def post_log(self, state, type, content):
+    def post_log(self, state, type, content, category = None, subcategory = None, log_id = None):
         try:
+            default_subcategory = "workflow" if self.runtime_info["job"] is not None else "notebook"
+            subcategory = subcategory if subcategory is not None else default_subcategory
             data = {
                 "logName": self.runtime_info["pipeline_name"],
                 "refId": self.runtime_info["ref_id"],
                 "sessionId": self.session_id,
-                "category": "databricks",
-                "subcategory": "workflow" if self.runtime_info["job"] is not None else "notebook",
+                "category": "databricks" if category is None else category,
+                "subcategory": subcategory, #"workflow" if self.runtime_info["job"] is not None else "notebook",
                 "service": self.runtime_info["host"],
                 "instance": self.runtime_info["pipeline_name"],
                 "state": state,
@@ -434,6 +436,8 @@ class LogService:
                     "content": content
                 }
             }
+            if log_id:
+                data["logId"] = log_id
             json_data = json.dumps(data, default=Functions.serialize_datetime)
             # print(self.runtime_info["config"]["Log"]["LogAPI"])
             print("Start post log:", datetime.now())
@@ -882,15 +886,29 @@ class Pipeline(PipelineCluster):
     streaming_listener = None
 
     def repair_run(self, job_name:str, params = None, timeout = 3600):
-        if self.last_run.job_run_id and self.last_run.job_run_result in ("FAILED", "TIMEDOUT", "CANCELED"):
-            self.logs.log("operations", { "operation": f're-run job:{job_name}' })
-            
-            wait_run = self.workspace.jobs.repair_run(self.last_run.job_run_id, latest_repair_id=self.last_run.latest_repair_id, job_parameters=params, rerun_all_failed_tasks=True)
-            print(f"Re-running the job {job_name} with status {self.last_run.job_run_result}.")
+        # if self.last_run.job_run_id:
+        #     run: Run = self.workspace.jobs.get_run(self.last_run.job_run_id)
+        #     run.state.result_state in (RunResultState.FAILED, RunResultState.TIMEDOUT, RunResultState.CANCELED)
+        job_id = self._get_job_id(job_name)
+        if job_id:#self.last_run.job_run_id:# and self.last_run.job_run_result in ("FAILED", "TIMEDOUT", "CANCELED"):
+            base_runs: Iterator[BaseRun] = self.workspace.jobs.list_runs(job_id=job_id, start_time_from=(datetime.now()-timedelta(hours=72)).timestamp()*1000)
+            #last_run: Run = self.workspace.jobs.get_run(job_id)
+            if base_runs:
+                last_base_run: BaseRun = next(base_runs, None)
+                if last_base_run:
+                    last_run: Run = self.workspace.jobs.get_run(last_base_run.run_id)
+                    if last_run and last_run.state.result_state in (RunResultState.FAILED, RunResultState.TIMEDOUT, RunResultState.CANCELED):
+                        self.logs.log("operations", { "operation": f're-run job:{job_name}' })
+                        last_repair_history_id = None
+                        if len(last_run.repair_history) > 0:
+                            last_repair_history_id = last_run.repair_history[-1].id
+                        wait_run = self.workspace.jobs.repair_run(last_run.run_id, latest_repair_id=last_repair_history_id, job_parameters=params, rerun_all_failed_tasks=True)
+                        #wait_run = self.workspace.jobs.repair_run(self.last_run.job_run_id, latest_repair_id=self.last_run.latest_repair_id, job_parameters=params, rerun_all_failed_tasks=True)
+                        print(f"Re-running the job {job_name} with status {last_run.state.result_state}.")
 
-            return self.__running(wait_run, timeout)
+                        return self.__running(wait_run, timeout)
         else:
-            print(f"Skip re-running the job {job_name} with status {self.last_run.job_run_result}.")
+            print(f"Skip re-running the job {job_name}.")
             return None
 
     def __running(self, wait_run:Wait[Run], timeout = 3600):
@@ -978,11 +996,11 @@ class Pipeline(PipelineCluster):
 
         self._assign_job_cluster(job_name)
 
-        if self.last_run.job_run_id:
-            run = self.repair_run(job_name, params, timeout)
-            if run:
-                self.logs.post_log("Running", "run_job", { "job_name": f'{job_name}', "job_params": params, "is_repair": True })
-                return (run, False)
+        #if self.last_run.job_run_id:
+        run = self.repair_run(job_name, params, timeout)
+        if run:
+            self.logs.post_log("Running", "run_job", { "job_name": f'{job_name}', "job_params": params, "is_repair": True })
+            return (run, False)
 
         if params is not None and isinstance(params, str):
             params = json.loads(params)
@@ -1292,18 +1310,26 @@ process_functions["{field.name}"] = process_{field.name}
         load_time = reader.load_time
         #.selectExpr("*", "_metadata as source_metadata")
         #:Callable[[DataFrame], DataFrame]
-        read_transform = None
-        write_transform = None
-        if isinstance(transform, list):
-            if len(transform) > 0:
-                    read_transform = transform[0]
-            if len(transform) > 1:
-                    write_transform = transform[1]
-        else:
-            read_transform = transform
-    
-        if read_transform is not None and callable(read_transform) and len(inspect.signature(read_transform).parameters) == 1:
-            df = read_transform(df)
+        # read_transform = None
+        # write_transform = None
+        # if isinstance(transform, list):
+        #     if len(transform) > 0:
+        #             read_transform = transform[0]
+        #     if len(transform) > 1:
+        #             write_transform = transform[1]
+        # else:
+        #     read_transform = transform
+        read_transform = transform
+        # if read_transform is not None and callable(read_transform) and len(inspect.signature(read_transform).parameters) == 1:
+        #     df = read_transform(df)
+        if read_transform is not None:
+            for col_name, expr in read_transform.items():
+                if isinstance(expr, str):
+                    df = df.withColumn(col_name, eval(expr))
+                elif isinstance(expr, dict):
+                    if "context" in expr:
+                        exec(expr["context"])
+                    df = df.withColumn(col_name, eval(expr["expr"]))
 
         df = self.__table_loading_streaming_process("_validations", table_alias, df, streaming_processor = streaming_processor, task_parameters = task_parameters)
 
@@ -1311,8 +1337,17 @@ process_functions["{field.name}"] = process_{field.name}
         df = df.observe("metrics", count(lit(1)).alias("cnt"), max(lit(load_id)).alias("load_id"), approx_count_distinct(col("_source_metadata.file_path")).alias("file_cnt")) #approx_count_distinct(col("_source_metadata.file_path")).alias("file_cnt")
         df = df.writeStream
 
-        if write_transform is not None and callable(write_transform) and len(inspect.signature(write_transform).parameters) == 1:
-            df = write_transform(df)
+        # if write_transform is not None and callable(write_transform) and len(inspect.signature(write_transform).parameters) == 1:
+        #     df = write_transform(df)
+        # if write_transform is not None:
+        #     for col_name, expr in write_transform.items():
+        #         if isinstance(expr, str):
+        #             df = df.withColumn(col_name, eval(expr))
+        #         elif isinstance(expr, dict):
+        #             if "context" in expr:
+        #                 exec(expr["context"])
+        #             df = df.withColumn(col_name, eval(expr["expr"]))
+        
         df = df.partitionBy("_load_id", "_load_time")
         start_time = time.time()
         if writer_options is not None:
@@ -1481,7 +1516,8 @@ process_functions["{field.name}"] = process_{field.name}
                 print(load_info_value)
                 if load_info_value:
                     load_info = load_info_value
-                    df_load_info = df_load_info.union(self.spark_session.createDataFrame([(load_info["table"], load_info["view"], load_info["load_id"])], load_info_schema))
+                    load_id = load_info.get("load_id")
+                    df_load_info = df_load_info.union(self.spark_session.createDataFrame([(load_info["table"], load_info["view"], load_id)], load_info_schema))
                     df_load_info.createOrReplaceTempView('load_info')
 
                     catalog = ""
@@ -1507,13 +1543,20 @@ process_functions["{field.name}"] = process_{field.name}
                                 select `_source_metadata`.file_name from {load_info["table"]}
                                 order by `_source_metadata`.file_modification_time desc
                                 limit 1)"""   
-
-                    query = f"""
-                        SELECT * 
-                        FROM {load_info["table"]} 
-                        WHERE _load_id = '{load_info["load_id"]}' 
-                        and _validations.is_valid = TRUE {load_option_filter}
-                        """
+                    if load_id:
+                        query = f"""
+                            SELECT * 
+                            FROM {load_info["table"]} 
+                            WHERE _load_id = '{load_id}' 
+                            and _validations.is_valid = TRUE {load_option_filter}
+                            """
+                    else:
+                        query = f"""
+                            SELECT * 
+                            FROM {load_info["table"]} 
+                            WHERE _validations.is_valid = TRUE {load_option_filter}
+                            """
+                    print(query)
                     temp_df = self.spark_session.sql(query)
                     if transform is not None and temp_view in transform:
                         transform_func = transform[temp_view]
@@ -1879,7 +1922,9 @@ process_functions["{field.name}"] = process_{field.name}
                 merge_result = merge_result.first()
                 source.createOrReplaceTempView("source_table")
                 insert_result = self.spark_session.sql(f"""
-                        insert into {target_table} select * from {source_table}
+                        insert into {target_table} 
+                        select {", ".join(insert_columns)}
+                        from {source_table}
                     """).collect()[0]
                 merge_result = Row(num_affected_rows=insert_result["num_affected_rows"] + merge_result["num_deleted_rows"], \
                                     num_inserted_rows=insert_result["num_inserted_rows"], \

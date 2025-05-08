@@ -1,0 +1,180 @@
+{
+    "name": "DatabricksLoadWorkflow",
+    "properties": {
+        "activities": [
+            {
+                "name": "run_load_job",
+                "type": "DatabricksNotebook",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "notebookPath": "/eVA/workflow_core/run_load_job",
+                    "baseParameters": {
+                        "default_catalog": {
+                            "value": "@pipeline().parameters.default_catalog",
+                            "type": "Expression"
+                        },
+                        "job_name": {
+                            "value": "@pipeline().parameters.job_name",
+                            "type": "Expression"
+                        },
+                        "pipeline_run_id": {
+                            "value": "@concat(pipeline().parameters.BatchRuntimeID, '_', pipeline().parameters.PipelineRuntimeID)",
+                            "type": "Expression"
+                        },
+                        "pipeline_name": {
+                            "value": "@concat(pipeline().parameters.Batch, '/', pipeline().parameters.PipelineName)",
+                            "type": "Expression"
+                        },
+                        "reader_options": {
+                            "value": "@if(empty(pipeline().parameters.reader_options), '{}', string(pipeline().parameters.reader_options))",
+                            "type": "Expression"
+                        },
+                        "reload_table": {
+                            "value": "@pipeline().parameters.reload_table",
+                            "type": "Expression"
+                        },
+                        "source_file": {
+                            "value": "@if(empty(pipeline().parameters.source_file), '{}', string(pipeline().parameters.source_file))",
+                            "type": "Expression"
+                        },
+                        "task_parameters": {
+                            "value": "@if(empty(pipeline().parameters.task_parameters), '{}', string(pipeline().parameters.task_parameters))",
+                            "type": "Expression"
+                        },
+                        "continue_run": {
+                            "value": "@string(pipeline().parameters.continue_run)",
+                            "type": "Expression"
+                        },
+                        "notebook_path": {
+                            "value": "@if(empty(pipeline().parameters.notebook_path), '{}', string(pipeline().parameters.notebook_path))",
+                            "type": "Expression"
+                        },
+                        "notebook_timeout": {
+                            "value": "@if(empty(pipeline().parameters.notebook_timeout), '{}', string(pipeline().parameters.notebook_timeout))",
+                            "type": "Expression"
+                        },
+                        "table_alias": {
+                            "value": "@if(empty(pipeline().parameters.table_alias), '{}', string(pipeline().parameters.table_alias))",
+                            "type": "Expression"
+                        },
+                        "target_table": {
+                            "value": "@if(empty(pipeline().parameters.target_table), '{}', string(pipeline().parameters.target_table))",
+                            "type": "Expression"
+                        },
+                        "max_load_rows": {
+                            "value": "@if(empty(pipeline().parameters.max_load_rows), '{}', string(pipeline().parameters.max_load_rows))",
+                            "type": "Expression"
+                        },
+                        "file_format": {
+                            "value": "@if(empty(pipeline().parameters.file_format), '{}', string(pipeline().parameters.file_format))",
+                            "type": "Expression"
+                        },
+                        "column_names": {
+                            "value": "@if(empty(pipeline().parameters.column_names), '{}', string(pipeline().parameters.column_names))",
+                            "type": "Expression"
+                        },
+                        "ref_id": {
+                            "value": "@pipeline().parameters.RefID",
+                            "type": "Expression"
+                        },
+                        "read_transform": {
+                            "value": "@if(empty(pipeline().parameters.read_transform), '{}', string(pipeline().parameters.read_transform))",
+                            "type": "Expression"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_adb_cluster",
+                    "type": "LinkedServiceReference",
+                    "parameters": {
+                        "ClusterID": {
+                            "value": "@pipeline().parameters.cluster_id",
+                            "type": "Expression"
+                        }
+                    }
+                }
+            }
+        ],
+        "parameters": {
+            "default_catalog": {
+                "type": "string"
+            },
+            "job_name": {
+                "type": "string"
+            },
+            "source_file": {
+                "type": "object"
+            },
+            "reader_options": {
+                "type": "object"
+            },
+            "reload_table": {
+                "type": "string",
+                "defaultValue": "Reload.DEFAULT"
+            },
+            "continue_run": {
+                "type": "string"
+            },
+            "task_parameters": {
+                "type": "object"
+            },
+            "BatchRuntimeID": {
+                "type": "string"
+            },
+            "Batch": {
+                "type": "string"
+            },
+            "PipelineRuntimeID": {
+                "type": "string"
+            },
+            "PipelineName": {
+                "type": "string"
+            },
+            "notebook_path": {
+                "type": "object"
+            },
+            "notebook_timeout": {
+                "type": "object"
+            },
+            "table_alias": {
+                "type": "object"
+            },
+            "target_table": {
+                "type": "object"
+            },
+            "max_load_rows": {
+                "type": "object"
+            },
+            "file_format": {
+                "type": "object"
+            },
+            "column_names": {
+                "type": "string"
+            },
+            "RefID": {
+                "type": "string"
+            },
+            "cluster_id": {
+                "type": "string",
+                "defaultValue": "0528-080821-9r5a98n9"
+            },
+            "read_transform": {
+                "type": "object"
+            }
+        },
+        "folder": {
+            "name": "ProcessUnit"
+        },
+        "annotations": [],
+        "lastPublishTime": "2024-12-24T07:25:06Z"
+    },
+    "type": "Microsoft.DataFactory/factories/pipelines"
+}
