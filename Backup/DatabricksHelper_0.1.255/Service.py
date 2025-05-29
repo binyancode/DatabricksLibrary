@@ -908,6 +908,7 @@ class Pipeline(PipelineCluster):
         exception = None
         try:
             run = wait_run.result(callback=run_callback, timeout=timedelta(seconds=timeout)) 
+            self.logs.log("job_run_request", run.as_dict(), True)
         except TimeoutError as ex:
             print(f"Timeout: {ex}")
             exception = ex
@@ -996,7 +997,6 @@ class Pipeline(PipelineCluster):
             params["default_catalog"] = self.default_catalog
         self.logs.log("operations", { "operation": f'run job:{job_name}' })
         wait_run = self.workspace.jobs.run_now(job_id, job_parameters=params)
-        self.logs.log("job_run_response", wait_run.response.as_dict(), True)
         print(f"Running the job {job_name}.")
         self.logs.post_log("Running", "run_job", { "job_name": f'{job_name}', "is_repair": False })
         return (self.__running(wait_run, timeout), self.__check_continue(job_name))
@@ -2175,16 +2175,14 @@ process_functions["{field.name}"] = process_{field.name}
     def __get_last_run(self):
         self.last_run = {}
         self.last_run["job_run_result"] = self.logs.get_last_log("job_run_results", ["state", "result_state"])
-        self.last_run["job_run_id"] = self.logs.get_last_log("job_run_response", ["run_id"])
+        self.last_run["job_run_id"] = self.logs.get_last_log("job_run_request", ["run_id"])
         
         self.last_run["latest_repair_id"] = None
         last_run = self.api.get_job_run(self.last_run["job_run_id"])
-        if last_run:
-            self.last_run["job_run_result_state"] = last_run["state"]["result_state"]
-            if "repair_history" in last_run:
-                repqirs = [repqir for repqir in last_run["repair_history"] if repqir["type"] == "REPAIR"]
-                if repqirs:
-                    self.last_run["latest_repair_id"] = repqirs[-1]["id"]
+        if "repair_history" in last_run:
+            repqirs = [repqir for repqir in last_run["repair_history"] if repqir["type"] == "REPAIR"]
+            if repqirs:
+                self.last_run["latest_repair_id"] = repqirs[-1]["id"]
         self.last_run = SimpleNamespace(**self.last_run)
         print(self.last_run)
 

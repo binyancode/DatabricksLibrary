@@ -2179,12 +2179,10 @@ process_functions["{field.name}"] = process_{field.name}
         
         self.last_run["latest_repair_id"] = None
         last_run = self.api.get_job_run(self.last_run["job_run_id"])
-        if last_run:
-            self.last_run["job_run_result_state"] = last_run["state"]["result_state"]
-            if "repair_history" in last_run:
-                repqirs = [repqir for repqir in last_run["repair_history"] if repqir["type"] == "REPAIR"]
-                if repqirs:
-                    self.last_run["latest_repair_id"] = repqirs[-1]["id"]
+        if "repair_history" in last_run:
+            repqirs = [repqir for repqir in last_run["repair_history"] if repqir["type"] == "REPAIR"]
+            if repqirs:
+                self.last_run["latest_repair_id"] = repqirs[-1]["id"]
         self.last_run = SimpleNamespace(**self.last_run)
         print(self.last_run)
 

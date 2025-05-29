@@ -58,9 +58,9 @@ class Functions:
         days = {date.day for date in dates}
         
         # 将年、月、日分别用大括号列出来，如果只有一个值则不加大括号
-        year_str = f"{{{','.join(map(str, sorted(years)))}}}" if len(years) > 1 else f"{next(iter(years))}"
-        month_str = f"{{{','.join(map(lambda x: f'{x:02}', sorted(months)))}}}" if len(months) > 1 else f"{next(iter(months)):02}"
-        day_str = f"{{{','.join(map(lambda x: f'{x:02}', sorted(days)))}}}" if len(days) > 1 else f"{next(iter(days)):02}"
+        year_str = f"year={{{','.join(map(str, sorted(years)))}}}" if len(years) > 1 else f"{next(iter(years))}"
+        month_str = f"month={{{','.join(map(lambda x: f'{x:02}', sorted(months)))}}}" if len(months) > 1 else f"{next(iter(months)):02}"
+        day_str = f"day={{{','.join(map(lambda x: f'{x:02}', sorted(days)))}}}" if len(days) > 1 else f"{next(iter(days)):02}"
         
         path = f"{year_str}/{month_str}/{day_str}"
 

@@ -886,15 +886,29 @@ class Pipeline(PipelineCluster):
     streaming_listener = None
 
     def repair_run(self, job_name:str, params = None, timeout = 3600):
-        if self.last_run.job_run_id:# and self.last_run.job_run_result in ("FAILED", "TIMEDOUT", "CANCELED"):
-            #self.logs.log("operations", { "operation": f're-run job:{job_name}' })
-            last_run: Run = self.workspace.jobs.get_run(self.last_run.job_run_id)
-            if last_run and last_run.state.result_state in (RunResultState.FAILED, RunResultState.TIMEDOUT, RunResultState.CANCELED):
-                wait_run = self.workspace.jobs.repair_run(self.last_run.job_run_id, latest_repair_id=self.last_run.latest_repair_id, job_parameters=params, rerun_all_failed_tasks=True)
-                print(f"Re-running the job {job_name} with status {last_run.state.result_state}.")
-                return self.__running(wait_run, timeout)
+        # if self.last_run.job_run_id:
+        #     run: Run = self.workspace.jobs.get_run(self.last_run.job_run_id)
+        #     run.state.result_state in (RunResultState.FAILED, RunResultState.TIMEDOUT, RunResultState.CANCELED)
+        job_id = self._get_job_id(job_name)
+        if job_id:#self.last_run.job_run_id:# and self.last_run.job_run_result in ("FAILED", "TIMEDOUT", "CANCELED"):
+            base_runs: Iterator[BaseRun] = self.workspace.jobs.list_runs(job_id=job_id, start_time_from=(datetime.now()-timedelta(hours=72)).timestamp()*1000)
+            #last_run: Run = self.workspace.jobs.get_run(job_id)
+            if base_runs:
+                last_base_run: BaseRun = next(base_runs, None)
+                if last_base_run:
+                    last_run: Run = self.workspace.jobs.get_run(last_base_run.run_id)
+                    if last_run and last_run.state.result_state in (RunResultState.FAILED, RunResultState.TIMEDOUT, RunResultState.CANCELED):
+                        self.logs.log("operations", { "operation": f're-run job:{job_name}' })
+                        last_repair_history_id = None
+                        if len(last_run.repair_history) > 0:
+                            last_repair_history_id = last_run.repair_history[-1].id
+                        wait_run = self.workspace.jobs.repair_run(last_run.run_id, latest_repair_id=last_repair_history_id, job_parameters=params, rerun_all_failed_tasks=True)
+                        #wait_run = self.workspace.jobs.repair_run(self.last_run.job_run_id, latest_repair_id=self.last_run.latest_repair_id, job_parameters=params, rerun_all_failed_tasks=True)
+                        print(f"Re-running the job {job_name} with status {last_run.state.result_state}.")
+
+                        return self.__running(wait_run, timeout)
         else:
-            print(f"Skip re-running the job {job_name} with status {self.last_run.job_run_result}.")
+            print(f"Skip re-running the job {job_name}.")
             return None
 
     def __running(self, wait_run:Wait[Run], timeout = 3600):
@@ -982,11 +996,11 @@ class Pipeline(PipelineCluster):
 
         self._assign_job_cluster(job_name)
 
-        if self.last_run.job_run_id:
-            run = self.repair_run(job_name, params, timeout)
-            if run:
-                self.logs.post_log("Running", "run_job", { "job_name": f'{job_name}', "job_params": params, "is_repair": True })
-                return (run, False)
+        #if self.last_run.job_run_id:
+        run = self.repair_run(job_name, params, timeout)
+        if run:
+            self.logs.post_log("Running", "run_job", { "job_name": f'{job_name}', "job_params": params, "is_repair": True })
+            return (run, False)
 
         if params is not None and isinstance(params, str):
             params = json.loads(params)
@@ -996,7 +1010,6 @@ class Pipeline(PipelineCluster):
             params["default_catalog"] = self.default_catalog
         self.logs.log("operations", { "operation": f'run job:{job_name}' })
         wait_run = self.workspace.jobs.run_now(job_id, job_parameters=params)
-        self.logs.log("job_run_response", wait_run.response.as_dict(), True)
         print(f"Running the job {job_name}.")
         self.logs.post_log("Running", "run_job", { "job_name": f'{job_name}', "is_repair": False })
         return (self.__running(wait_run, timeout), self.__check_continue(job_name))
@@ -2175,16 +2188,14 @@ process_functions["{field.name}"] = process_{field.name}
     def __get_last_run(self):
         self.last_run = {}
         self.last_run["job_run_result"] = self.logs.get_last_log("job_run_results", ["state", "result_state"])
-        self.last_run["job_run_id"] = self.logs.get_last_log("job_run_response", ["run_id"])
+        self.last_run["job_run_id"] = self.logs.get_last_log("job_run_results", ["run_id"])
         
         self.last_run["latest_repair_id"] = None
         last_run = self.api.get_job_run(self.last_run["job_run_id"])
-        if last_run:
-            self.last_run["job_run_result_state"] = last_run["state"]["result_state"]
-            if "repair_history" in last_run:
-                repqirs = [repqir for repqir in last_run["repair_history"] if repqir["type"] == "REPAIR"]
-                if repqirs:
-                    self.last_run["latest_repair_id"] = repqirs[-1]["id"]
+        if "repair_history" in last_run:
+            repqirs = [repqir for repqir in last_run["repair_history"] if repqir["type"] == "REPAIR"]
+            if repqirs:
+                self.last_run["latest_repair_id"] = repqirs[-1]["id"]
         self.last_run = SimpleNamespace(**self.last_run)
         print(self.last_run)
 
