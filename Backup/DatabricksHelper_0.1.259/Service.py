@@ -126,7 +126,7 @@ class PipelineAPI:
     def request(self, method, path, data = None, headers = None):
         if headers is None:
             headers = {}
-        if data is not None and not isinstance(data, str):
+        if not isinstance(data, str):
             data = json.dumps(data)
         headers["Authorization"] = f"Bearer {self.token}"
         headers["Content-Type"] = "application/json"
@@ -134,19 +134,6 @@ class PipelineAPI:
         return response.json()
 
     def get(self, path, data = None, headers = None):
-        if data:
-            if '?' not in path:
-                path += '?'
-            else:
-                if not path.endswith('?'):
-                    path += '&'
-            
-            query_params = []
-            for key, value in data.items():
-                if value is not None: 
-                    query_params.append(f"{key}={value}")
-            
-            path += '&'.join(query_params)
         return self.request("GET", path, data, headers)
 
     def post(self, path, data, headers = None):
@@ -155,38 +142,9 @@ class PipelineAPI:
     def get_job_run(self, run_id, api_version = "2.1"):
         return self.get(f"/api/{api_version}/jobs/runs/get", data={"run_id":run_id, "include_history":True})
 
-    def get_token(self):
-        if self.client_id is None or self.client_secret is None:
-            return
-        data = {
-            'grant_type': 'client_credentials',
-            'scope': 'all-apis'
-        }
-
-        # Make the POST request with Basic Authentication
-        response = requests.post(
-            self.token_endpoint,
-            auth=(self.client_id, self.client_secret),
-            data=data
-        )
-        if response.status_code == 200:
-            token_data = response.json()
-            print("Access token obtained successfully:")
-            #print(f"Access Token: {token_data.get('access_token')}")
-            print(f"Expires in: {token_data.get('expires_in')} seconds")
-            self.token = token_data.get('access_token')
-        else:
-            print(f"Error: {response.status_code}")
-            print(response.text)
-            raise Exception(f"Failed to obtain access token: {response.status_code} - {response.text}")
-
-    def __init__(self, host, token = None, client_id = None, client_secret = None, protocol = "https") -> None:
+    def __init__(self, host, token, protocol = "https") -> None:
         self.host = f"{protocol}://{host}"
-        self.token_endpoint = f"{self.host}/oidc/v1/token"
         self.token = token
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self.get_token()
 
 class PipelineSpark:
     def _init_databricks(self):
@@ -397,8 +355,7 @@ class PipelineService(PipelineSpark):
         else:
             self.workspace = WorkspaceClient(host=self.host, token=token)
             print("Using personal access token")
-
-        self.api = PipelineAPI(host=self.host, token=token, client_id=client_id, client_secret=client_secret)
+        self.api = PipelineAPI(host=self.host, token=token)
         self.catalog = self.config["Data"]["Catalog"]
         self.log_api = self.databricks_dbutils.secrets.get(scope=self.config["Log"]["LogAPI"]["Scope"], key=self.config["Log"]["LogAPI"]["Url"])
 

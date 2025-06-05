@@ -7,7 +7,7 @@ from pyspark.sql.connect.dataframe import DataFrame as ConnectDataFrame
 
 class PipelineUtils:
     def __string_to_md5(self, input_string):
-        md5_obj = hashlib.sha256()
+        md5_obj = hashlib.md5()
         md5_obj.update(input_string.encode('utf-8'))
         md5_value = md5_obj.hexdigest()
         return md5_value

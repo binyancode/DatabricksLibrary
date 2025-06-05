@@ -126,7 +126,7 @@ class PipelineAPI:
     def request(self, method, path, data = None, headers = None):
         if headers is None:
             headers = {}
-        if data is not None and not isinstance(data, str):
+        if not isinstance(data, str):
             data = json.dumps(data)
         headers["Authorization"] = f"Bearer {self.token}"
         headers["Content-Type"] = "application/json"
@@ -134,19 +134,6 @@ class PipelineAPI:
         return response.json()
 
     def get(self, path, data = None, headers = None):
-        if data:
-            if '?' not in path:
-                path += '?'
-            else:
-                if not path.endswith('?'):
-                    path += '&'
-            
-            query_params = []
-            for key, value in data.items():
-                if value is not None: 
-                    query_params.append(f"{key}={value}")
-            
-            path += '&'.join(query_params)
         return self.request("GET", path, data, headers)
 
     def post(self, path, data, headers = None):
