@@ -101,8 +101,7 @@ class MergeMode(IntFlag):
     MergeInto = 1
     DeleteAndInsert = 2
     MergeOverwrite = 3
-    InsertOverwrite = 4,
-    Append = 5
+    InsertOverwrite = 4
 
 class DataReader:
     def __init__(self, data, load_id, load_time):
@@ -929,13 +928,13 @@ class PipelineCluster(PipelineService):
 class Pipeline(PipelineCluster):
     streaming_listener = None
 
-    def repair_run(self, job_name:str, job_id:int, params = None, timeout = 3600):
+    def repair_run(self, job_name:str, params = None, timeout = 3600):
         if self.last_run.job_run_id:# and self.last_run.job_run_result in ("FAILED", "TIMEDOUT", "CANCELED"):
             #self.logs.log("operations", { "operation": f're-run job:{job_name}' })
             last_run: Run = self.workspace.jobs.get_run(self.last_run.job_run_id, include_history=True)
             if last_run and last_run.state.result_state in (RunResultState.FAILED, RunResultState.TIMEDOUT, RunResultState.CANCELED):
-                print(f"Re-running the job {job_name} job_id:{job_id}, run_id:{self.last_run.job_run_id} repair_id:{self.last_run.latest_repair_id} with status {last_run.state.result_state}.")
                 wait_run = self.workspace.jobs.repair_run(self.last_run.job_run_id, latest_repair_id=self.last_run.latest_repair_id, job_parameters=params, rerun_all_failed_tasks=True)
+                print(f"Re-running the job {job_name} with status {last_run.state.result_state}.")
                 return self.__running(wait_run, timeout)
         else:
             print(f"Skip re-running the job {job_name} with status {self.last_run.job_run_result}.")
@@ -1027,7 +1026,7 @@ class Pipeline(PipelineCluster):
         self._assign_job_cluster(job_name)
 
         if self.last_run.job_run_id:
-            run = self.repair_run(job_name, job_id, params, timeout)
+            run = self.repair_run(job_name, params, timeout)
             if run:
                 self.logs.post_log("Running", "run_job", { "job_name": f'{job_name}', "job_params": params, "is_repair": True })
                 return (run, False)
@@ -1939,7 +1938,7 @@ process_functions["{field.name}"] = process_{field.name}
                 temp_source_table = str(uuid.uuid4()).replace('-', '')
                 source.groupBy(*keys).count().createOrReplaceTempView(temp_source_table)
                 merge_condition = " AND ".join([f"target.{k} = grouping_source.{k}" for k in keys])
-                
+
                 merge_sql = f"""
                 MERGE INTO {target_table} AS target
                 USING {temp_source_table} AS grouping_source
@@ -1994,12 +1993,7 @@ process_functions["{field.name}"] = process_{field.name}
                 source.createOrReplaceTempView(temp_source_table)      
                 merge_result = self.spark_session.sql(f"INSERT OVERWRITE TABLE {target_table} select * from {temp_source_table}").collect()
                 merge_result = merge_result[0]     
-            elif mode == MergeMode.Append:
-                temp_source_table = str(uuid.uuid4()).replace('-', '')
-                source.createOrReplaceTempView(temp_source_table)      
-                merge_result = self.spark_session.sql(f"INSERT INTO TABLE {target_table} select * from {temp_source_table}").collect()
-                merge_result = merge_result[0]
-            
+        
             end_time = time.time()
             print(f"Finish merge table {target_table}: {datetime.now()}")
 
