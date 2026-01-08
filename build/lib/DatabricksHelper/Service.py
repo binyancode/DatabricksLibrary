@@ -1060,6 +1060,9 @@ class Pipeline(PipelineCluster):
         .option("cloudFiles.schemaLocation", schema_dir)\
         .option("cloudFiles.useStrictGlobber", "true")
 
+        reader_option_variant_column = None
+        
+
         if 'ReaderOptions' in self.config["Data"]:
             for key, value in self.config["Data"]["ReaderOptions"].items():
                 df = df.option(key, value)
@@ -1067,6 +1070,7 @@ class Pipeline(PipelineCluster):
         if reader_options is not None:
             for key, value in reader_options.items():
                 df = df.option(key, value)
+            reader_option_variant_column = reader_options.get("singleVariantColumn", None)
 
         df = df.load(source_file)
         
@@ -1086,7 +1090,7 @@ class Pipeline(PipelineCluster):
         .withColumn("_load_time",lit(load_time)) 
 
         reader = DataReader(df, load_id, load_time)
-        return reader
+        return (reader, reader_option_variant_column)
 
     def __get_catalog(self, target_table):
         # 使用正则表达式找到所有被``包围的字符串，并将它们替换为无`.`的版本，但保留``
@@ -1238,8 +1242,8 @@ class Pipeline(PipelineCluster):
             validation["validation_result"] = validation_result
             validation["validations"] = validations
             return validation
-
-        df = df.withColumn(validation_col_name, process_validations(struct([df[col] for col in df.columns])))
+        non_variant_cols = [name for name, dtype in df.dtypes if dtype.lower() != "variant"]
+        df = df.withColumn(validation_col_name, process_validations(struct([df[col] for col in non_variant_cols])))
 
         if streaming_processor_obj:
             process_functions = {}
@@ -1334,7 +1338,7 @@ process_functions["{field.name}"] = process_{field.name}
                     print(f'clear table:{target_table}')
         #spark.streams.addListener(Listener())
 
-        reader = self.__read_data(source_file, file_format, schema_dir, reader_options, column_names)
+        reader, reader_option_variant_column = self.__read_data(source_file, file_format, schema_dir, reader_options, column_names)
         df = reader.data
         load_id = reader.load_id
         load_time = reader.load_time
@@ -1377,6 +1381,20 @@ process_functions["{field.name}"] = process_{field.name}
         #             if "context" in expr:
         #                 exec(expr["context"])
         #             df = df.withColumn(col_name, eval(expr["expr"]))
+        
+        if reader_option_variant_column is not None:
+            self.spark_session.sql(f"""
+                CREATE TABLE if not exists {target_table} (
+                    {reader_option_variant_column} VARIANT,
+                    _rescued_data STRING,
+                    _source_metadata STRUCT<file_path: STRING, file_name: STRING, file_size: BIGINT, file_block_start: BIGINT, file_block_length: BIGINT, file_modification_time: TIMESTAMP>,
+                    _row_id STRING,
+                    _load_id STRING,
+                    _load_time TIMESTAMP,
+                    _validations STRUCT<is_valid: BOOLEAN, validation_result: INT, validations: ARRAY<STRUCT<rule_id: STRING, result: INT, description: STRING, data: STRING, attributes: ARRAY<STRING>, tags: ARRAY<STRING>, category: STRING, rule_type: STRING, failed_process: STRING, n_successes: INT, n_fails: INT, properties: MAP<STRING, STRING>>>>)
+                    USING delta
+                    PARTITIONED BY (_load_id, _load_time)
+            """)
         
         df = df.partitionBy("_load_id", "_load_time")
         start_time = time.time()
